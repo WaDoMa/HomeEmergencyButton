@@ -1,0 +1,9 @@
+# Ignore Spyder project settings
+.spyproject/
+.spyderproject
+
+# Ignore Python virtual environments named .venv
+.venv/
+
+# Ignore environment variable files containing secrets and config
+.env
