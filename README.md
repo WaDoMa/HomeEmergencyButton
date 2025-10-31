@@ -1,98 +1,388 @@
 # Home Emergency Button
-A Raspberry Pi-based emergency alert agent.
 
+A Raspberry Pi-based emergency alert system that monitors system health and IoT button events, providing reliable notifications via Telegram.
 
-## SD Card Health Monitoring Workflow 
+## Project Overview
 
-To maximize reliabilty and detect early signs of SD card degradation, the Raspberry Pi emergency button project
-implements a weekly filesystem check combined with automated monitoring and reporting:
+This project implements a resilient emergency alerting system designed for continuous operation on Raspberry Pi hardware. The system focuses on two key functions:
 
-### 1. Weekly Filesystem System
-- A forced filesystem check (fsck) runs on all partitions during a weekly reboot.
-- It is triggered by a cron job.
-- This ensures that minor filesystem errors are repaired before they escalate, increasing the operational availibilty.
+1. **System Health Monitoring**: Continuous monitoring of SD card health, kernel warnings, and power/thermal events
+2. **Emergency Button Integration**: Detection and notification of IoT button press events (in development)
 
-### 2. Kernel and Systems Logs Monitoring
-- Kernel warnings and errors related to the SD card are monitored to detect read/write retries, coorupted blocks, or other anomalies that *fsck* may not catch.
-- Relevant logs are collected from:
-    - *journalctl* (last 7 days)
-    - *dmesg* (current boot)
-    - *system-fsck* service logs
+### Design Philosophy
 
-### 3. Automated Reportimg via Telegram
-- A Python service runs after boot and aggregates the reports.
-- Only relevant lines related to SD card issues are included:
-    - *fsck* repair or corruption messages
-    - Kernel warnings/errors
-    - dmesg error lines
-- The summary is sent via Telegram to a designated channel, providing eraly warning of SD card wear or filesystem problems.
+The project prioritizes **reliability and early failure detection** through:
 
-### 4. Benefits
-- Continuous monitoring of SD card health without manual intervention.
-- Early detection of failing SD cards before critical data loss or failing of alerting system occurs.
-- Centralized reporting allows remote observation of system reliabitly.
+- Proactive SD card health monitoring to prevent system failures
+- Weekly filesystem checks to repair errors before they escalate
+- Automated logging and reporting for remote system observation
+- Graceful error handling and recovery mechanisms
+- Minimal dependencies to reduce failure points
 
-### Compact Workflow
-Weekly cron → reboot → force fsck on all partitions → Python monitoring service collects fsck/journalctl/dmesg logs → filter SD card issues → send report via Telegram
+## Features
 
+### Current Capabilities
 
-## System Configuration
+- **SD Card Health Monitoring**: Detects filesystem errors, read/write issues, and block corruption
+- **Kernel Log Analysis**: Monitors kernel warnings and errors related to storage devices
+- **Power/Thermal Monitoring**: Tracks undervoltage events, overtemperature conditions, and throttling
+- **Disk Usage Reporting**: Regular filesystem capacity monitoring
+- **Automated Telegram Notifications**: Sends consolidated health reports to designated channels
+- **Service Management**: Runs as a systemd service with automatic restart on failure
 
-## 1. Increase Filesystem Robustness on the Raspberry Pi
+### Planned Features
 
-### Edit the kernel command line
-Open the boot configuration file for editing:
-```shell
-sudo nano /boot/firmware/cmdline.txt
+- **IoT Button Event Detection**: Monitor and respond to WiFi-based emergency button presses
+- **Button Event Notifications**: Send immediate alerts when emergency buttons are triggered
+
+## System Architecture
+
+### Monitoring Workflow
 ```
-Add the following parameters (append on the same line) to force filesystem checks and automatic repairs on every boot:
-```text
-fsck.mode=force fsck.repair=yes
+Weekly cron → Reboot → Force fsck on all partitions → 
+Emergency Alert Agent starts → Collects logs from journalctl/dmesg/fsck → 
+Filters relevant issues → Sends report via Telegram
 ```
-Save and exit the editor.
 
-### Schedule Weekly Reboots to Trigger Filesystem Checks
-Edit the root user's crontab:
-```shell
+### Log Sources
+
+The system aggregates information from multiple sources:
+
+- **journalctl**: System journal entries (configurable time range, default 7 days)
+- **dmesg**: Kernel ring buffer (current boot)
+- **systemd-fsck**: Filesystem check service logs
+- **df**: Disk usage statistics
+
+## Prerequisites
+
+### Hardware
+
+- Raspberry Pi (any model with SD card storage)
+- Stable power supply (recommended: official Raspberry Pi power supply)
+- Network connectivity (WiFi or Ethernet)
+
+### Software
+
+- Raspberry Pi OS (or compatible Linux distribution)
+- Python 3.9 or higher
+- systemd (standard on Raspberry Pi OS)
+- Internet access for Telegram API
+
+## Installation
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/WaDoMa/HomeEmergencyButton.git
+cd HomeEmergencyButton
+```
+
+### 2. Create Virtual Environment
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # On Linux/macOS
+# Or: .venv\Scripts\activate  # On Windows
+```
+
+### 3. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+**Required Python packages:**
+- `python-telegram-bot` - Telegram Bot API wrapper
+- `python-dotenv` - Environment variable management
+- `nest-asyncio` - Asyncio compatibility for interactive environments
+
+### 4. Configure Telegram
+
+#### Create a Telegram Bot
+
+1. Open Telegram and search for `@BotFather`
+2. Send `/newbot` and follow the prompts to create your bot
+3. Save the bot token provided by BotFather
+
+#### Create Telegram Channels
+
+Create two channels for different notification types:
+
+1. **Technical Stats Channel**: For system health reports
+   - Create a new Telegram channel
+   - Add your bot as an administrator
+   - Get the channel ID (e.g., `-1001234567890`)
+
+2. **Emergency Alerts Channel**: For emergency button events (future use)
+   - Create another Telegram channel
+   - Add your bot as an administrator
+   - Get the channel ID
+
+**To find a channel ID:**
+- Forward a message from the channel to `@userinfobot`
+- Or use the Telegram API to get updates after adding the bot
+
+#### Set Up Environment Variables
+
+Create a `.env` file in the project root directory:
+```bash
+# .env file
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+CHANNEL_ID_TechStats=-1001234567890
+CHANNEL_ID_EmergencyAlerts=-1009876543210
+DEBUG=false
+```
+
+**Security note**: Never commit the `.env` file to version control. It's already included in `.gitignore`.
+
+### 5. Configure System for Enhanced Reliability
+
+#### Schedule Weekly Reboots
+
+Configure a weekly reboot to trigger filesystem checks:
+```bash
 sudo crontab -e
 ```
-Add a cron job to reboot every Saturday at 3:00 AM:
-```text
-# Weekly reboot to trigger filesystem check, part of Home Emergency Button project maintenance
-0 3 * * Saturday /usr/bin/touch /forcefsck && /sbin/shutdown -r now
 
-```
-This schedule ensures a regular reboot that triggers the filesystem check, increasing system stability.
-
-## 2. Create a System Service to Launch `emergency_button_notificator.py` on Startup
-
-### Copy the Service Definition File
-Copy the service file to the systemd directory:
-```shell
-sudo cp ./system_configuration/emergency_button_notificator.service /etc/systemd/system/emergency_button_notificator.service
-```
-### Make the Python Script Executable
-Set the script as executable:
-```shell
-sudo chmod +x ./script/emergency_button_notificator.py
-```
-### Enable and Start the Service
-Reload systemd, enable the service to start on boot, and start it immediately:
-```shell
-sudo systemctl daemon-reload
-sudo systemctl enable emergency_button_notificator.service
-sudo systemctl start emergency_button_notificator.service
+Add the following line:
+```cron
+# Weekly reboot for filesystem maintenance (Home Emergency Button project)
+0 3 * * Saturday /sbin/shutdown -r now
 ```
 
-## 3. Install Dependencies
+This schedules a reboot every Saturday at 3:00 AM.
 
-```shell
-pip install scapy dotenv configparser python-telegram-bot
+### 6. Install the System Service
+
+The project includes an automated installation script that supports two modes:
+
+#### Option A: User-Level Service (Recommended)
+
+Installs the service under your user account with automatic boot startup:
+```bash
+chmod +x script/install_service.sh
+./script/install_service.sh
 ```
-## 4. Create Telegram Ressources
 
-Create Telegram bot by @BotFather and create environment variable with its' TELEGRAM_BOT_TOKEN.
-Search Bot by its' username '@mybotname' and start it by pressing start button or by sending '/start'.
-Create Telegram Channel for technical stats, search bot and add it as adminstrator. Create environment variable with its' CANNEL_ID.
-Create Telegram Channel for the alert messages and create environment variable with its' CANNEL_ID.
+This automatically:
+- Creates the systemd user service
+- Enables the service to start at boot
+- Configures lingering so the service runs even when not logged in
+- Starts the service immediately
 
+#### Option B: System-Level Service
+
+For production deployments requiring system-wide service:
+```bash
+sudo ./script/install_service.sh --system
+```
+
+### 7. Verify Installation
+
+Check the service status:
+```bash
+# For user-level service
+systemctl --user status emergency_button.service
+
+# For system-level service
+sudo systemctl status emergency_button.service
+```
+
+View real-time logs:
+```bash
+# For user-level service
+journalctl --user -u emergency_button.service -f
+
+# For system-level service
+sudo journalctl -u emergency_button.service -f
+```
+
+## Usage
+
+### Service Management
+
+#### User-Level Service Commands
+```bash
+# Check service status
+systemctl --user status emergency_button.service
+
+# View logs
+journalctl --user -u emergency_button.service -f
+
+# Stop the service
+systemctl --user stop emergency_button.service
+
+# Restart the service
+systemctl --user restart emergency_button.service
+
+# Disable auto-start
+systemctl --user disable emergency_button.service
+
+# Re-enable auto-start
+systemctl --user enable emergency_button.service
+```
+
+#### System-Level Service Commands
+```bash
+# Check service status
+sudo systemctl status emergency_button.service
+
+# View logs
+sudo journalctl -u emergency_button.service -f
+
+# Stop the service
+sudo systemctl stop emergency_button.service
+
+# Restart the service
+sudo systemctl restart emergency_button.service
+```
+
+### Uninstalling the Service
+```bash
+./script/install_service.sh --uninstall
+```
+
+This automatically detects and removes the installed service (user or system level).
+
+## Development
+
+### Project Structure
+```
+HomeEmergencyButton/
+├── script/
+│   ├── emergency_button_notificator.py    # Main monitoring agent
+│   └── install_service.sh                 # Service installation script
+├── systemd/
+│   └── emergency_button.service           # Systemd service definition
+├── config/
+│   └── buttons.ini                        # IoT button configuration (optional)
+├── .venv/                                 # Python virtual environment
+├── .env                                   # Environment variables (not in git)
+├── .gitignore                            # Git ignore rules
+├── requirements.txt                       # Python dependencies
+└── README.md                             # This file
+```
+
+### Setting Up Development Environment
+
+1. **Clone and enter the repository:**
+```bash
+   git clone https://github.com/WaDoMa/HomeEmergencyButton.git
+   cd HomeEmergencyButton
+```
+
+2. **Create and activate virtual environment:**
+```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+```
+
+3. **Install dependencies:**
+```bash
+   pip install -r requirements.txt
+```
+
+4. **Configure environment variables** as described in the installation section
+
+5. **Run the script manually for testing:**
+```bash
+   python script/emergency_button_notificator.py
+```
+
+### Code Style and Philosophy
+
+The codebase follows these principles:
+
+- **Explicit imports**: Uses module-level imports with prefixes (e.g., `pathlib as pth`) for namespace clarity
+- **Type hints**: Comprehensive type annotations for better code documentation
+- **Error handling**: Graceful degradation with informative error messages
+- **Modular design**: Separated concerns for logging, filtering, and reporting
+- **Documentation**: Detailed docstrings following NumPy style
+
+### Contributing
+
+When developing new features:
+
+1. **Test filesystem operations** thoroughly - the system monitors critical storage
+2. **Handle errors gracefully** - the service must continue running despite failures
+3. **Log appropriately** - use proper logging levels (info, warning, error)
+4. **Update documentation** - keep README and docstrings current
+5. **Test service behavior** - verify restart and recovery mechanisms
+
+### Debugging
+
+Enable debug mode by setting the environment variable:
+```bash
+DEBUG=true
+```
+
+This provides additional output including:
+- Configuration values (sanitized)
+- Report contents before sending
+- Detailed execution flow
+
+## Monitoring and Maintenance
+
+### Expected Behavior
+
+- Service starts automatically after boot (typically within 30-60 seconds)
+- Sends initial health report to Telegram on startup
+- Monitors system continuously for new events
+- Restarts automatically if it crashes (30-second delay)
+
+### Troubleshooting
+
+#### Service Not Starting
+
+Check the service logs:
+```bash
+journalctl --user -u emergency_button.service --no-pager
+```
+
+Common issues:
+- Missing `.env` file or incorrect environment variables
+- Virtual environment not created or dependencies not installed
+- Incorrect file paths in service definition
+
+#### No Telegram Messages
+
+Verify:
+- Bot token is correct in `.env`
+- Channel IDs are correct (include the minus sign for channels)
+- Bot has been added as administrator to channels
+- Raspberry Pi has internet connectivity
+
+#### Lingering Not Enabled
+
+If service stops when you log out:
+```bash
+sudo loginctl enable-linger $USER
+```
+
+Verify it's enabled:
+```bash
+loginctl show-user $USER | grep Linger
+```
+
+Should show: `Linger=yes`
+
+## Security Considerations
+
+- **Environment variables**: Never commit `.env` file to version control
+- **Bot token**: Keep your Telegram bot token secret
+- **Channel IDs**: Restrict channel access to authorized users only
+- **File permissions**: Ensure service files are not world-writable
+- **Network security**: Consider firewall rules if exposing services
+
+## License
+
+[Specify your license here]
+
+## Acknowledgments
+
+- Raspberry Pi Foundation for the hardware platform
+- Telegram for the Bot API
+- The Python community for excellent libraries
+
+## Support
+
+For issues, questions, or contributions:
+- **GitHub Issues**: https://github.com/WaDoMa/HomeEmergencyButton/issues
+- **Documentation**: https://github.com/WaDoMa/HomeEmergencyButton/README.md

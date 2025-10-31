@@ -1,0 +1,4 @@
+scapy
+dotenv
+configparser
+python-telegram-bot
