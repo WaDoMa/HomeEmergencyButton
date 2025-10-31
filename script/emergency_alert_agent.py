@@ -3,12 +3,12 @@
 """
 Emergency Alert Agent
 
-This agent monitors IoT buttons (e.g., WiFi-based triggers) and system logs 
-related to SD card health, kernel warnings, and power/thermal events. It sends
-collected information to a Telegram channel for real-time monitoring.
+This agent monitors system logs related to SD card health, kernel warnings,
+and power/thermal events. It sends collected information to a Telegram channel
+for real-time monitoring.
 
 Modules:
-- asyncio, nest_asyncio: Asynchronous execution
+- asyncio: Asynchronous execution
 - subprocess: Running shell commands
 - pathlib: File system paths
 - configparser: Reading configuration files
@@ -19,48 +19,85 @@ Author: Your Name
 Created on: YYYY-MM-DD
 """
 
+# Standard library
 import asyncio
 import subprocess
-import nest_asyncio
 import os
 import sys
 import pathlib as pth
-import typing as tpg
-import dotenv as dt
+import typing as typ
+import dataclasses as dc
 import configparser as cfg
-import telegram
 
-# ------------------- Constants ------------------- #
+# Third-party
+import dotenv as dt
+import telegram as tg
+import telegram.error as tg_error
+
+
+# ------------------- Configuration ------------------- #
 APP_NAME = "Emergency Alerting Agent"
-
-# Project directory (two levels up from this file)
 PROJECT_DIR = pth.Path(__file__).parents[1]
+CONFIG_PATH = PROJECT_DIR / 'config' / 'buttons.ini'
 
-# Path to configuration file storing IoT button MAC addresses
-CONFIG_PATH = PROJECT_DIR.joinpath('config', 'buttons.ini')
-
-# SD card device to monitor (used in dmesg/journal filtering)
+# Monitoring configuration
 SD_DEVICE = "mmcblk0"
-
-# Keywords to identify filesystem check issues
 FSCK_KEYWORDS = ["repaired", "error", "corrupt", "lost"]
+POWER_KEYWORDS = ["under-volt", "over-temp", "thrott", "thermal"]
+POWER_IGNORE_PATTERNS = [
+    "thermal_sys: Registered thermal governor",
+    "systemd-pstore.service"
+]
+
+# Default time ranges
+DEFAULT_LOOKBACK_DAYS = 7
+
+
+@dc.dataclass
+class SystemReport:
+    """Container for all system health reports."""
+    disk_usage: str
+    fsck: str
+    kernel_warnings: str
+    dmesg_errors: str
+    power_thermal: str
+
+    def format_message(self) -> str:
+        """Format all reports into a single Telegram message."""
+        sections = [
+            ("📊 System Health Report", None),
+            ("💾 Disk Usage", self.disk_usage),
+            ("🛠 FSCK Results", self.fsck),
+            ("⚠ Kernel Warnings/Errors (last 7 days)", self.kernel_warnings),
+            ("💻 Current Boot dmesg Errors", self.dmesg_errors),
+            ("⚡ Power & Thermal / Undervoltage Alerts", self.power_thermal),
+        ]
+
+        message_parts = []
+        for title, content in sections:
+            if content is None:
+                message_parts.append(f"{title}:\n")
+            else:
+                message_parts.append(f"{title}:\n{content}\n")
+
+        return "\n".join(message_parts).strip()
 
 
 # ------------------- Helper Functions ------------------- #
-def get_config(config_path: str | pth.Path, section: str) -> tpg.Dict[str, str]:
+def load_config_section(config_path: pth.Path, section: str) -> dict[str, str]:
     """
     Read a section from an INI configuration file.
 
     Parameters
     ----------
-    config_path : str | pathlib.Path
+    config_path : pathlib.Path
         Path to the configuration file.
     section : str
         Section name in the INI file.
 
     Returns
     -------
-    dict
+    dict[str, str]
         Dictionary of key-value pairs from the section.
 
     Raises
@@ -68,7 +105,7 @@ def get_config(config_path: str | pth.Path, section: str) -> tpg.Dict[str, str]:
     ValueError
         If the section does not exist in the file.
     """
-    parser = cfg.ConfigParser(delimiters=('='))
+    parser = cfg.ConfigParser(delimiters=('=',))
     parser.optionxform = str  # preserve case
     parser.read(config_path)
 
@@ -78,7 +115,7 @@ def get_config(config_path: str | pth.Path, section: str) -> tpg.Dict[str, str]:
     return dict(parser.items(section))
 
 
-def run_cmd(cmd: list[str]) -> str:
+def run_command(cmd: list[str], max_lines: typ.Optional[int] = None) -> str:
     """
     Execute a shell command and return its output.
 
@@ -86,6 +123,8 @@ def run_cmd(cmd: list[str]) -> str:
     ----------
     cmd : list[str]
         Command and arguments as a list.
+    max_lines : int | None
+        Maximum number of lines to return (for limiting large outputs).
 
     Returns
     -------
@@ -93,195 +132,195 @@ def run_cmd(cmd: list[str]) -> str:
         Command output as string. Returns empty string if command fails.
     """
     try:
-        return subprocess.check_output(cmd, text=True)
-    except subprocess.CalledProcessError:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            return ""
+        
+        output = result.stdout
+        if max_lines:
+            lines = output.splitlines()[:max_lines]
+            output = "\n".join(lines)
+            if len(result.stdout.splitlines()) > max_lines:
+                output += f"\n... (truncated, {len(result.stdout.splitlines()) - max_lines} more lines)"
+        
+        return output
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
         return ""
 
 
 def filter_lines(
-    text_or_lines: str | list[str],
-    keywords: list[str] | None = None,
-    ignore_patterns: list[str] | None = None
+    lines: list[str],
+    include_keywords: typ.Optional[list[str]] = None,
+    exclude_patterns: typ.Optional[list[str]] = None
 ) -> list[str]:
     """
-    Filter a set of lines by inclusion and exclusion patterns.
+    Filter lines by inclusion and exclusion patterns.
 
     Parameters
     ----------
-    text_or_lines : str | list[str]
-        Input text (multi-line string) or list of lines.
-    keywords : list[str] | None
+    lines : list[str]
+        List of lines to filter.
+    include_keywords : list[str] | None
         Only include lines containing any of these keywords (case-insensitive).
-    ignore_patterns : list[str] | None
+    exclude_patterns : list[str] | None
         Exclude lines containing any of these patterns (case-insensitive).
 
     Returns
     -------
     list[str]
-        Filtered lines as a list.
+        Filtered lines.
     """
-    # Convert string to list of lines if necessary
-    lines = text_or_lines.splitlines() if isinstance(text_or_lines, str) else text_or_lines
+    filtered = lines
 
-    # Include lines matching any keyword
-    if keywords:
-        lines = [line for line in lines if any(k.lower() in line.lower() for k in keywords)]
+    if include_keywords:
+        filtered = [
+            line for line in filtered
+            if any(keyword.lower() in line.lower() for keyword in include_keywords)
+        ]
 
-    # Exclude lines matching any ignore pattern
-    if ignore_patterns:
-        lines = [line for line in lines if not any(ig.lower() in line.lower() for ig in ignore_patterns)]
+    if exclude_patterns:
+        filtered = [
+            line for line in filtered
+            if not any(pattern.lower() in line.lower() for pattern in exclude_patterns)
+        ]
 
-    return lines
-
-
-def filter_sd_lines(output: str) -> list[str]:
-    """
-    Filter lines that reference the SD card device.
-
-    Parameters
-    ----------
-    output : str
-        Text output from logs or commands.
-
-    Returns
-    -------
-    list[str]
-        Lines mentioning the SD_DEVICE.
-    """
-    return filter_lines(output, [SD_DEVICE])
+    return filtered
 
 
-# ------------------- Reporting Functions ------------------- #
-def get_journal_report(
-    keywords: list[str] | None = None,
-    ignore_patterns: list[str] | None = None,
-    priorities: str | None = None,
+# ------------------- Journal Query Functions ------------------- #
+def query_journal(
+    include_keywords: typ.Optional[list[str]] = None,
+    exclude_patterns: typ.Optional[list[str]] = None,
+    priorities: typ.Optional[str] = None,
     since: str = "7 days ago",
-    boot: str | None = None,
-    device_filter: bool = False
+    boot: typ.Optional[str] = None,
+    max_lines: int = 1000
 ) -> list[str]:
     """
-    Collect and filter kernel log messages using journalctl.
+    Query systemd journal with filters.
 
     Parameters
     ----------
-    keywords : list[str] | None
+    include_keywords : list[str] | None
         Include lines containing these keywords.
-    ignore_patterns : list[str] | None
+    exclude_patterns : list[str] | None
         Exclude lines containing these patterns.
     priorities : str | None
         Kernel log priorities (e.g., 'warning..alert').
     since : str
-        Start date for log collection (e.g., "7 days ago").
+        Start date for log collection.
     boot : str | None
-        Specific boot ID or "-b" offset.
-    device_filter : bool
-        If True, include only lines related to SD_DEVICE.
+        Specific boot ID or offset.
+    max_lines : int
+        Maximum number of lines to process.
 
     Returns
     -------
     list[str]
         Filtered log lines.
     """
-    cmd = ["journalctl", "-k", "--no-pager", "--since", since]
+    cmd = ["journalctl", "-k", "--no-pager", "--since", since, f"--lines={max_lines}"]
+    
     if priorities:
         cmd.extend(["-p", priorities])
     if boot:
         cmd.extend(["-b", boot])
 
-    output = run_cmd(cmd)
+    output = run_command(cmd)
+    if not output:
+        return []
 
-    # Filter by SD device if requested
-    if device_filter:
-        output = "\n".join(filter_sd_lines(output))
-
-    # Apply keyword and ignore filters
-    return filter_lines(output, keywords, ignore_patterns)
+    lines = output.splitlines()
+    return filter_lines(lines, include_keywords, exclude_patterns)
 
 
-def get_device_report(
-    source: str = "journalctl",
-    device: str | None = None,
-    keywords: list[str] | None = None,
-    ignore_patterns: list[str] | None = None,
-    priorities: str | None = None,
-    since: str = "7 days ago",
-    boot: str | None = None
-) -> str:
+def query_dmesg(
+    include_keywords: typ.Optional[list[str]] = None,
+    exclude_patterns: typ.Optional[list[str]] = None
+) -> list[str]:
     """
-    Generic function to collect logs from journalctl or dmesg and filter them.
+    Query dmesg output with filters.
 
     Parameters
     ----------
-    source : str
-        Log source ("journalctl" or "dmesg").
-    device : str | None
-        Device identifier to filter logs (e.g., SD card).
-    keywords : list[str] | None
-        Lines must contain at least one keyword.
-    ignore_patterns : list[str] | None
-        Lines containing these patterns are excluded.
-    priorities : str | None
-        Kernel log priorities (for journalctl).
-    since : str
-        Start date for journal logs.
-    boot : str | None
-        Boot offset or ID for journalctl.
+    include_keywords : list[str] | None
+        Include lines containing these keywords.
+    exclude_patterns : list[str] | None
+        Exclude lines containing these patterns.
+
+    Returns
+    -------
+    list[str]
+        Filtered log lines.
+    """
+    output = run_command(["dmesg"], max_lines=1000)
+    if not output:
+        return []
+
+    lines = output.splitlines()
+    return filter_lines(lines, include_keywords, exclude_patterns)
+
+
+# ------------------- Specific Report Functions ------------------- #
+def get_disk_usage_report(all_fs: bool = True) -> str:
+    """
+    Get disk usage statistics using `df -h`.
+
+    Parameters
+    ----------
+    all_fs : bool
+        If True, report all filesystems; if False, report only root '/'.
 
     Returns
     -------
     str
-        Filtered logs as a single string or default message if empty.
+        Formatted disk usage output.
     """
-    if source == "journalctl":
-        lines = get_journal_report(
-            keywords=keywords,
-            ignore_patterns=ignore_patterns,
-            priorities=priorities,
-            since=since,
-            boot=boot,
-            device_filter=bool(device)
-        )
-    elif source == "dmesg":
-        output = run_cmd(["dmesg"])
-        if device:
-            output = "\n".join(filter_lines(output, [device]))
-        lines = filter_lines(output, keywords, ignore_patterns)
-    else:
-        return f"Unknown log source: {source}"
+    cmd = ["df", "-h"]
+    if not all_fs:
+        cmd.append("/")
 
-    return "\n".join(lines) if lines else "No matching log entries found."
+    output = run_command(cmd)
+    return output if output else "Unable to retrieve disk usage."
 
 
-# ------------------- Specific Report Functions ------------------- #
 def get_sd_fsck_report() -> str:
     """Return SD card filesystem check results since boot."""
-    return get_device_report(
-        source="journalctl",
-        device=SD_DEVICE,
-        keywords=FSCK_KEYWORDS,
+    lines = query_journal(
+        include_keywords=[SD_DEVICE] + FSCK_KEYWORDS,
         since="boot"
     )
+    return "\n".join(lines) if lines else "No FSCK issues found."
+
+
+def get_sd_kernel_warnings() -> str:
+    """Return kernel warnings/errors for SD card."""
+    lines = query_journal(
+        include_keywords=[SD_DEVICE],
+        priorities="warning..alert",
+        since=f"{DEFAULT_LOOKBACK_DAYS} days ago"
+    )
+    return "\n".join(lines) if lines else "No kernel warnings found."
+
 
 def get_sd_dmesg_errors() -> str:
     """Return dmesg errors related to SD card."""
-    return get_device_report(
-        source="dmesg",
-        device=SD_DEVICE,
-        keywords=["error"]
+    lines = query_dmesg(
+        include_keywords=[SD_DEVICE, "error"]
     )
+    return "\n".join(lines) if lines else "No dmesg errors found."
 
-def get_sd_card_kernel_warnings() -> str:
-    """Return kernel warnings/errors for SD card."""
-    return get_device_report(
-        source="journalctl",
-        device=SD_DEVICE,
-        priorities="warning..alert"
-    )
 
-def get_power_thermal_undervolt_events(days: int = 7) -> str:
+def get_power_thermal_events(days: int = DEFAULT_LOOKBACK_DAYS) -> str:
     """
-    Return power, thermal, and undervoltage events over the last N days.
+    Return power, thermal, and undervoltage events.
 
     Parameters
     ----------
@@ -293,114 +332,117 @@ def get_power_thermal_undervolt_events(days: int = 7) -> str:
     str
         Formatted report.
     """
-    keywords = ["under-volt", "over-temp", "thrott", "thermal"]
-    ignore_patterns = [
-        "thermal_sys: Registered thermal governor",
-        "systemd-pstore.service"
-    ]
-    return get_device_report(
-        source="journalctl",
-        keywords=keywords,
-        ignore_patterns=ignore_patterns,
+    lines = query_journal(
+        include_keywords=POWER_KEYWORDS,
+        exclude_patterns=POWER_IGNORE_PATTERNS,
         since=f"{days} days ago"
     )
-
-
-def get_disk_usage_report(all_fs: bool = True) -> str:
-    """
-    Get disk usage statistics for all mounted filesystems using `df -h`.
-    Uses the existing `run_cmd` and `filter_lines` helpers for consistency.
-
-    Parameters
-    ----------
-    all_fs : bool
-        If True, report all filesystems; if False, report only root '/'.
-
-    Returns
-    -------
-    str
-        Formatted disk usage lines suitable for Telegram message, including
-        the header line.
-    """
-    cmd = ["df", "-h"]
-    if not all_fs:
-        cmd.append("/")  # Only check root if all_fs is False
-
-    output = run_cmd(cmd)
-    if not output:
-        return "Unable to retrieve df output."
-
-    lines = filter_lines(output.splitlines(), ignore_patterns=["^$"])  # remove empty lines
-    if not lines:
-        return "No usable output from df."
-
-    # Preserve header line
-    header, *data_lines = lines
-    formatted = "\n".join([header] + data_lines)
-
-    return f"{formatted}"
-
-
+    return "\n".join(lines) if lines else "No power/thermal events found."
 
 
 # ------------------- Main Logic ------------------- #
-async def main():
-    """Collect all reports and send to Telegram channel."""
-    print(f"Starting {APP_NAME}...")
+def collect_system_reports() -> SystemReport:
+    """Collect all system health reports."""
+    print("Collecting system reports...")
+    
+    return SystemReport(
+        disk_usage=get_disk_usage_report(all_fs=True),
+        fsck=get_sd_fsck_report(),
+        kernel_warnings=get_sd_kernel_warnings(),
+        dmesg_errors=get_sd_dmesg_errors(),
+        power_thermal=get_power_thermal_events()
+    )
 
-    # Load button configuration
+
+async def send_telegram_message(bot_token: str, chat_id: str, message: str) -> bool:
+    """
+    Send a message via Telegram with error handling.
+
+    Parameters
+    ----------
+    bot_token : str
+        Telegram bot token.
+    chat_id : str
+        Target chat/channel ID.
+    message : str
+        Message to send.
+
+    Returns
+    -------
+    bool
+        True if successful, False otherwise.
+    """
     try:
-        buttons = get_config(CONFIG_PATH, 'Buttons')
-    except ValueError as e:
-        print(e)
-        buttons = {}
+        bot = tg.Bot(token=bot_token)
+        await bot.send_message(chat_id=chat_id, text=message)
+        print("✓ Message sent successfully to Telegram")
+        return True
+    except tg_error.TelegramError as e:
+        print(f"✗ Failed to send Telegram message: {e}", file=sys.stderr)
+        return False
 
-    # Print loaded buttons
-    if buttons:
-        for mac_address, button_name in buttons.items():
-            print(f"MAC Address: {mac_address} -> Button Name: {button_name}")
-    else:
-        print("No buttons found.")
+
+async def main():
+    """Main execution function."""
+    print(f"Starting {APP_NAME}...\n")
 
     # Load environment variables
     dt.load_dotenv()
     telegram_bot_token = os.getenv('TELEGRAM_BOT_TOKEN')
-    channel_id_tech_stats = os.getenv('CHANNEL_ID_TechStats')
-    debug = os.getenv('DEBUG')
+    channel_id = os.getenv('CHANNEL_ID_TechStats')
+    debug = os.getenv('DEBUG', 'false').lower() == 'true'
 
-    print(f'TELEGRAM_BOT_TOKEN: {telegram_bot_token}')
-    print(f'CHANNEL_ID_TechStats: {channel_id_tech_stats}')
-    print(f'DEBUG: {debug}')
+    # Validate configuration
+    if not telegram_bot_token or not channel_id:
+        print("Error: Missing TELEGRAM_BOT_TOKEN or CHANNEL_ID_TechStats", file=sys.stderr)
+        sys.exit(1)
 
-    # Collect system reports
-    fsck_report = get_sd_fsck_report()
-    kernel_report = get_sd_card_kernel_warnings()
-    dmesg_report = get_sd_dmesg_errors()
-    power_thermal_undervolt_report = get_power_thermal_undervolt_events(days=7)
-    disk_usage_report = get_disk_usage_report(all_fs=True)
-    
-    # Combine all reports into one message
+    if debug:
+        print("Debug mode enabled")
+        print(f"Channel ID: {channel_id}\n")
 
+    # Load button configuration (if needed for future features)
+    try:
+        buttons = load_config_section(CONFIG_PATH, 'Buttons')
+        if debug and buttons:
+            print("Loaded buttons:")
+            for mac, name in buttons.items():
+                print(f"  {mac} -> {name}")
+            print()
+    except (ValueError, FileNotFoundError) as e:
+        if debug:
+            print(f"Note: {e}\n")
 
-    message = (
-    f"📊 System Health Report:\n\n"
-    f"💾 Disk Usage Report:\n{disk_usage_report}\n\n"
-    f"🛠 FSCK results:\n{fsck_report}\n\n"
-    f"⚠ Kernel warnings/errors (last 7 days):\n{kernel_report}\n\n"
-    f"💻 Current boot dmesg errors:\n{dmesg_report}\n\n"
-    f"⚡ Power & Thermal / Undervoltage Alerts:\n{power_thermal_undervolt_report}"
-    )
+    # Collect and send reports
+    report = collect_system_reports()
+    message = report.format_message()
 
-    # Send message via Telegram
-    bot = telegram.Bot(token=telegram_bot_token)
-    await bot.send_message(chat_id=channel_id_tech_stats, text=message)
+    if debug:
+        print("\n" + "="*50)
+        print("Message to send:")
+        print("="*50)
+        print(message)
+        print("="*50 + "\n")
+
+    success = await send_telegram_message(telegram_bot_token, channel_id, message)
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":
     try:
-        nest_asyncio.apply()  # allow nested event loops (required in Jupyter, etc.)
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(main())
+        # Check if there's already a running event loop (e.g., in Spyder, Jupyter)
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in an existing event loop, use it directly
+            import nest_asyncio  # Special case for Spyder compatibility
+            nest_asyncio.apply()
+            loop.run_until_complete(main())
+        except RuntimeError:
+            # No running loop, use asyncio.run() (standard approach)
+            asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted by user")
+        sys.exit(130)
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"Unexpected error: {e}", file=sys.stderr)
         sys.exit(1)
