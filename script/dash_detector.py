@@ -2,11 +2,6 @@
 """
 Amazon Dash Button Detector
 Detects when Dash buttons are pressed by monitoring ARP packets
-
-Source:
-    $ HomeEmergencyButton/.venv/bin/activate
-Call (here with 100 s timeout):
-    $ sudo HomeEmergencyButton/.venv/bin/python3 dash_detector.py discover 100
 """
 
 import scapy.all
