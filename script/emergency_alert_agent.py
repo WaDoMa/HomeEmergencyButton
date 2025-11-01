@@ -42,8 +42,10 @@ CONFIG_PATH = PROJECT_DIR / 'config' / 'buttons.ini'
 
 # Monitoring configuration
 SD_DEVICE = "mmcblk0"
+SD_KEYWORDS = ["mmc", "mmcblk", "blk_update_request", "Buffer I/O error", 
+               "end_request: I/O error"]
 FSCK_KEYWORDS = ["repaired", "error", "corrupt", "lost"]
-POWER_KEYWORDS = ["under-volt", "over-temp", "thrott", "thermal"]
+POWER_KEYWORDS = ["under-voltage", "over-temp", "throttl", "thermal"]
 POWER_IGNORE_PATTERNS = [
     "thermal_sys: Registered thermal governor",
     "systemd-pstore.service"
@@ -58,8 +60,8 @@ class SystemReport:
     """Container for all system health reports."""
     disk_usage: str
     fsck: str
-    kernel_warnings: str
-    dmesg_errors: str
+    kernel_errors: str
+    sd_warnings: str
     power_thermal: str
 
     def format_message(self) -> str:
@@ -67,10 +69,10 @@ class SystemReport:
         sections = [
             ("📊 System Health Report", None),
             ("💾 Disk Usage", self.disk_usage),
-            ("🛠 FSCK Results", self.fsck),
-            ("⚠ Kernel Warnings/Errors (last 7 days)", self.kernel_warnings),
-            ("💻 Current Boot dmesg Errors", self.dmesg_errors),
-            ("⚡ Power & Thermal / Undervoltage Alerts", self.power_thermal),
+            ("🛠 FSCK Results (since boot)", self.fsck),
+            ("⚠ Kernel Errors (last 7 days)", self.kernel_errors),
+            ("💿 SD Card Warnings (last 7 days)", self.sd_warnings),
+            ("⚡ Power & Thermal Alerts (last 7 days)", self.power_thermal),
         ]
 
         message_parts = []
@@ -213,7 +215,7 @@ def query_journal(
     exclude_patterns : list[str] | None
         Exclude lines containing these patterns.
     priorities : str | None
-        Kernel log priorities (e.g., 'warning..alert').
+        Kernel log priorities (e.g., 'err', 'warning').
     since : str
         Start date for log collection.
     boot : str | None
@@ -234,33 +236,6 @@ def query_journal(
         cmd.extend(["-b", boot])
 
     output = run_command(cmd)
-    if not output:
-        return []
-
-    lines = output.splitlines()
-    return filter_lines(lines, include_keywords, exclude_patterns)
-
-
-def query_dmesg(
-    include_keywords: typ.Optional[list[str]] = None,
-    exclude_patterns: typ.Optional[list[str]] = None
-) -> list[str]:
-    """
-    Query dmesg output with filters.
-
-    Parameters
-    ----------
-    include_keywords : list[str] | None
-        Include lines containing these keywords.
-    exclude_patterns : list[str] | None
-        Exclude lines containing these patterns.
-
-    Returns
-    -------
-    list[str]
-        Filtered log lines.
-    """
-    output = run_command(["dmesg"], max_lines=1000)
     if not output:
         return []
 
@@ -300,22 +275,40 @@ def get_sd_fsck_report() -> str:
     return "\n".join(lines) if lines else "No FSCK issues found."
 
 
-def get_sd_kernel_warnings() -> str:
-    """Return kernel warnings/errors for SD card."""
+def get_kernel_errors() -> str:
+    """
+    Return all kernel errors (priority err and above) from last 7 days.
+    This replaces the old dmesg error check and provides persistent logs.
+    """
     lines = query_journal(
-        include_keywords=[SD_DEVICE],
-        priorities="warning..alert",
+        priorities="err",
         since=f"{DEFAULT_LOOKBACK_DAYS} days ago"
     )
-    return "\n".join(lines) if lines else "No kernel warnings found."
+    return "\n".join(lines) if lines else "No kernel errors found."
 
 
-def get_sd_dmesg_errors() -> str:
-    """Return dmesg errors related to SD card."""
-    lines = query_dmesg(
-        include_keywords=[SD_DEVICE, "error"]
+def get_sd_warnings() -> str:
+    """
+    Return SD card related warnings and issues from last 7 days.
+    Includes both priority warnings and keyword-based detection.
+    """
+    # Get priority warnings
+    priority_lines = query_journal(
+        include_keywords=SD_KEYWORDS,
+        priorities="warning",
+        since=f"{DEFAULT_LOOKBACK_DAYS} days ago"
     )
-    return "\n".join(lines) if lines else "No dmesg errors found."
+    
+    # Get all logs with SD-related error keywords
+    keyword_lines = query_journal(
+        include_keywords=SD_KEYWORDS + FSCK_KEYWORDS,
+        since=f"{DEFAULT_LOOKBACK_DAYS} days ago"
+    )
+    
+    # Combine and deduplicate
+    all_lines = list(dict.fromkeys(priority_lines + keyword_lines))
+    
+    return "\n".join(all_lines) if all_lines else "No SD card warnings found."
 
 
 def get_power_thermal_events(days: int = DEFAULT_LOOKBACK_DAYS) -> str:
@@ -348,8 +341,8 @@ def collect_system_reports() -> SystemReport:
     return SystemReport(
         disk_usage=get_disk_usage_report(all_fs=True),
         fsck=get_sd_fsck_report(),
-        kernel_warnings=get_sd_kernel_warnings(),
-        dmesg_errors=get_sd_dmesg_errors(),
+        kernel_errors=get_kernel_errors(),
+        sd_warnings=get_sd_warnings(),
         power_thermal=get_power_thermal_events()
     )
 

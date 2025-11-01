@@ -1,4 +1,3 @@
-scapy
-dotenv
-configparser
-python-telegram-bot
+python-telegram-bot>=20.0
+python-dotenv>=1.0.0
+nest-asyncio>=1.5.0  # Optional: only needed for Jupyter/Spyder testing

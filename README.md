@@ -6,7 +6,7 @@ A Raspberry Pi-based emergency alert system that monitors system health and IoT 
 
 This project implements a resilient emergency alerting system designed for continuous operation on Raspberry Pi hardware. The system focuses on two key functions:
 
-1. **System Health Monitoring**: Continuous monitoring of SD card health, kernel warnings, and power/thermal events
+1. **System Health Monitoring**: Continuous monitoring of SD card health, kernel errors, and power/thermal events with persistent logs across reboots
 2. **Emergency Button Integration**: Detection and notification of IoT button press events (in development)
 
 ### Design Philosophy
@@ -14,18 +14,18 @@ This project implements a resilient emergency alerting system designed for conti
 The project prioritizes **reliability and early failure detection** through:
 
 - Proactive SD card health monitoring to prevent system failures
-- Weekly filesystem checks to repair errors before they escalate
-- Automated logging and reporting for remote system observation
-- Graceful error handling and recovery mechanisms
-- Minimal dependencies to reduce failure points
+- Weekly automated reboots with filesystem checks to repair errors before they escalate
+- Persistent logging via systemd journal for tracking issues across boot cycles
+- Automated reporting for remote system observation
 
 ## Features
 
 ### Current Capabilities
 
-- **SD Card Health Monitoring**: Detects filesystem errors, read/write issues, and block corruption
-- **Kernel Log Analysis**: Monitors kernel warnings and errors related to storage devices
+- **Persistent Kernel Error Monitoring**: Tracks all kernel errors (priority "err" and above) from the last 7 days using journalctl, surviving reboots
+- **SD Card Health Monitoring**: Detects filesystem errors, read/write issues, block corruption, and MMC/block device failures
 - **Power/Thermal Monitoring**: Tracks undervoltage events, overtemperature conditions, and throttling
+- **FSCK Integration**: Monitors filesystem check results since last boot
 - **Disk Usage Reporting**: Regular filesystem capacity monitoring
 - **Automated Telegram Notifications**: Sends consolidated health reports to designated channels
 - **Service Management**: Runs as a systemd service with automatic restart on failure
@@ -40,7 +40,7 @@ The project prioritizes **reliability and early failure detection** through:
 ### Monitoring Workflow
 ```
 Weekly cron → Reboot → Force fsck on all partitions → 
-Emergency Alert Agent starts → Collects logs from journalctl/dmesg/fsck → 
+Emergency Alert Agent starts → Collects logs from journalctl (last 7 days) → 
 Filters relevant issues → Sends report via Telegram
 ```
 
@@ -48,10 +48,18 @@ Filters relevant issues → Sends report via Telegram
 
 The system aggregates information from multiple sources:
 
-- **journalctl**: System journal entries (configurable time range, default 7 days)
-- **dmesg**: Kernel ring buffer (current boot)
-- **systemd-fsck**: Filesystem check service logs
+- **journalctl**: System journal entries (kernel messages from last 7 days, persistent across reboots)
+- **systemd-fsck**: Filesystem check service logs (since current boot)
 - **df**: Disk usage statistics
+
+### Key Design Decision: journalctl vs dmesg
+
+This system exclusively uses `journalctl -k` (kernel messages from systemd journal) instead of `dmesg` because:
+
+- **Persistence**: journalctl maintains logs across reboots, while dmesg only shows current boot session
+- **Time range**: Can query logs from the last 7 days, even if multiple reboots occurred
+- **Priority filtering**: Native support for kernel log levels (err, warning, etc.)
+- **Reliability**: Survives kernel ring buffer overflows
 
 ## Prerequisites
 
@@ -63,9 +71,9 @@ The system aggregates information from multiple sources:
 
 ### Software
 
-- Raspberry Pi OS (or compatible Linux distribution)
+- Raspberry Pi OS (or compatible Linux distribution with systemd)
 - Python 3.9 or higher
-- systemd (standard on Raspberry Pi OS)
+- systemd with persistent journal enabled (standard on Raspberry Pi OS)
 - Internet access for Telegram API
 
 ## Installation
@@ -134,6 +142,20 @@ DEBUG=false
 
 ### 5. Configure System for Enhanced Reliability
 
+#### Enable Persistent Journal (Verify)
+
+Most Raspberry Pi OS installations have persistent journaling enabled by default. Verify with:
+```bash
+ls -la /var/log/journal/
+```
+
+If the directory doesn't exist, enable persistent logging:
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
 #### Schedule Weekly Reboots
 
 Configure a weekly reboot to trigger filesystem checks:
@@ -144,10 +166,10 @@ sudo crontab -e
 Add the following line:
 ```cron
 # Weekly reboot for filesystem maintenance (Home Emergency Button project)
-0 3 * * Saturday /sbin/shutdown -r now
+0 3 * * 0 /sbin/shutdown -r now
 ```
 
-This schedules a reboot every Saturday at 3:00 AM.
+This schedules a reboot every Sunday at 3:00 AM.
 
 ### 6. Install the System Service
 
@@ -264,26 +286,26 @@ HomeEmergencyButton/
 
 1. **Clone and enter the repository:**
 ```bash
-   git clone https://github.com/WaDoMa/HomeEmergencyButton.git
-   cd HomeEmergencyButton
+git clone https://github.com/WaDoMa/HomeEmergencyButton.git
+cd HomeEmergencyButton
 ```
 
 2. **Create and activate virtual environment:**
 ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 ```
 
 3. **Install dependencies:**
 ```bash
-   pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 4. **Configure environment variables** as described in the installation section
 
 5. **Run the script manually for testing:**
 ```bash
-   python script/emergency_button_notificator.py
+python script/emergency_button_notificator.py
 ```
 
 ### Code Style and Philosophy
@@ -292,17 +314,32 @@ The codebase follows these principles:
 
 - **Explicit imports**: Uses module-level imports with prefixes (e.g., `pathlib as pth`) for namespace clarity
 - **Type hints**: Comprehensive type annotations for better code documentation
-- **Error handling**: Graceful degradation with informative error messages
+- **Error handling**: Functions return empty strings/lists on failure rather than raising exceptions
 - **Modular design**: Separated concerns for logging, filtering, and reporting
 - **Documentation**: Detailed docstrings following NumPy style
+
+### Monitoring Strategy
+
+The system uses journalctl for all kernel monitoring because it provides:
+
+1. **Persistent logs across reboots** - Essential for weekly monitoring cycles
+2. **Priority-based filtering** - Direct access to kernel error levels (err, warning, etc.)
+3. **Time-range queries** - Can request logs from specific time periods (e.g., "last 7 days")
+4. **Reliability** - Survives kernel ring buffer overflows that can lose dmesg messages
+
+Key monitoring patterns:
+- `get_kernel_errors()`: All kernel errors (priority "err") from last 7 days
+- `get_sd_warnings()`: SD card issues combining priority warnings and keyword detection
+- `get_power_thermal_events()`: Power/thermal issues with pattern exclusions
+- `get_sd_fsck_report()`: Filesystem check results since current boot
 
 ### Contributing
 
 When developing new features:
 
 1. **Test filesystem operations** thoroughly - the system monitors critical storage
-2. **Handle errors gracefully** - the service must continue running despite failures
-3. **Log appropriately** - use proper logging levels (info, warning, error)
+2. **Handle errors gracefully** - functions should return empty results rather than crash
+3. **Use journalctl for kernel monitoring** - don't add dmesg dependencies
 4. **Update documentation** - keep README and docstrings current
 5. **Test service behavior** - verify restart and recovery mechanisms
 
@@ -324,8 +361,18 @@ This provides additional output including:
 
 - Service starts automatically after boot (typically within 30-60 seconds)
 - Sends initial health report to Telegram on startup
-- Monitors system continuously for new events
-- Restarts automatically if it crashes (30-second delay)
+- Report includes logs from the last 7 days, even if multiple reboots occurred
+- Service restarts automatically if it crashes (30-second delay)
+
+### System Health Report Contents
+
+Each report includes:
+
+1. **💾 Disk Usage**: Current filesystem capacity (all mounted filesystems)
+2. **🛠 FSCK Results**: Filesystem check findings since current boot
+3. **⚠ Kernel Errors**: All kernel errors (priority "err" and above) from last 7 days
+4. **💿 SD Card Warnings**: SD card specific issues from last 7 days
+5. **⚡ Power & Thermal Alerts**: Undervoltage, overtemperature, and throttling events from last 7 days
 
 ### Troubleshooting
 
@@ -340,6 +387,7 @@ Common issues:
 - Missing `.env` file or incorrect environment variables
 - Virtual environment not created or dependencies not installed
 - Incorrect file paths in service definition
+- Persistent journal not enabled
 
 #### No Telegram Messages
 
@@ -348,6 +396,12 @@ Verify:
 - Channel IDs are correct (include the minus sign for channels)
 - Bot has been added as administrator to channels
 - Raspberry Pi has internet connectivity
+
+Test connectivity:
+```bash
+# Test if Telegram API is reachable
+curl -I https://api.telegram.org
+```
 
 #### Lingering Not Enabled
 
@@ -363,6 +417,30 @@ loginctl show-user $USER | grep Linger
 
 Should show: `Linger=yes`
 
+#### Missing Historical Logs
+
+If reports don't show logs from previous boots:
+
+1. Verify persistent journal is enabled:
+```bash
+ls -la /var/log/journal/
+journalctl --list-boots
+```
+
+2. Check journal configuration:
+```bash
+grep Storage /etc/systemd/journald.conf
+```
+
+Should show: `Storage=persistent` or `Storage=auto` (default)
+
+3. If needed, enable persistent logging:
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
 ## Security Considerations
 
 - **Environment variables**: Never commit `.env` file to version control
@@ -370,6 +448,7 @@ Should show: `Linger=yes`
 - **Channel IDs**: Restrict channel access to authorized users only
 - **File permissions**: Ensure service files are not world-writable
 - **Network security**: Consider firewall rules if exposing services
+- **Log retention**: journalctl retains logs based on `/etc/systemd/journald.conf` settings (default: use up to 10% of disk space)
 
 ## License
 
@@ -380,6 +459,7 @@ Should show: `Linger=yes`
 - Raspberry Pi Foundation for the hardware platform
 - Telegram for the Bot API
 - The Python community for excellent libraries
+- systemd project for robust logging infrastructure
 
 ## Support
 
