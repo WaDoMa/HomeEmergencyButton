@@ -1,0 +1,34 @@
+[Unit]
+Description=Home Emergency Button Notificator - System health monitoring and emergency button detection
+Documentation=https://github.com/WaDoMa/HomeEmergencyButton/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=200
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Run as root for packet sniffing (required for Dash button detection via ARP monitoring)
+User=root
+Group=root
+WorkingDirectory=%h/HomeEmergencyButton
+ExecStart=%h/HomeEmergencyButton/.venv/bin/python3 %h/HomeEmergencyButton/script/emergency_button_notificator.py
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=30
+
+# Environment
+Environment="PYTHONUNBUFFERED=1"
+
+# Security settings - allow network packet capture while limiting other privileges
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/HomeEmergencyButton
+
+[Install]
+WantedBy=multi-user.target

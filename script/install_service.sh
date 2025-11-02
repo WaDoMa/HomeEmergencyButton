@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
 # -*- coding: utf-8 -*-
 #
-# Installation script for Home Emergency Button Agent systemd service
+# Installation script for Home Emergency Button Notification systemd service
 #
 # This script installs and configures the emergency button service as a
-# user-level systemd service. It automatically detects the project directory
-# and sets up the service without requiring manual path configuration.
+# system-level service (requires root for packet sniffing).
 #
 # Usage:
 #   ./install_service.sh [OPTIONS]
 #
 # Options:
-#   --system       Install as system-level service (requires sudo, runs at boot)
-#   --user         Install as user-level service (default, requires lingering for boot)
 #   --uninstall    Remove the service
 #   --help         Show this help message
 #
@@ -26,9 +23,7 @@ SERVICE_NAME="emergency_button.service"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVICE_FILE="${PROJECT_DIR}/systemd/${SERVICE_NAME}"
-USER_SYSTEMD_DIR="${HOME}/.config/systemd/user"
 SYSTEM_SYSTEMD_DIR="/etc/systemd/system"
-INSTALL_MODE="user"  # Default to user-level service
 
 # Colors for output
 RED='\033[0;31m'
@@ -58,32 +53,25 @@ show_help() {
     cat << EOF
 Home Emergency Button Service Installer
 
-Usage: $0 [OPTIONS]
+Usage: sudo $0 [OPTIONS]
 
 Options:
-    --user         Install as user-level service (default, requires lingering)
-    --system       Install as system-level service (requires sudo, auto-starts at boot)
     --uninstall    Remove the service and disable it
     --help         Show this help message
 
-Installation Modes:
-    User-level (--user):
-      - Service runs under your user account
-      - Requires 'loginctl enable-linger' to start at boot
-      - Does not require sudo for installation
-      - Service file: ~/.config/systemd/user/emergency_button.service
+Installation:
+    The service is installed as a system-level service that:
+      - Runs as root (required for packet sniffing with scapy)
+      - Starts automatically at boot
+      - Monitors for Dash button presses via ARP packets
+      - Sends system health reports and emergency alerts via Telegram
 
-    System-level (--system):
-      - Service runs at system boot automatically
-      - Requires sudo for installation
-      - Service file: /etc/systemd/system/emergency_button.service
-      - Recommended for production deployments
+    Note: Root privileges are required because packet sniffing (scapy)
+          needs raw network access to detect Dash button ARP packets.
 
 Examples:
-    $0                    Install as user service (default)
-    $0 --user             Install as user service (explicit)
-    $0 --system           Install as system service (requires sudo)
-    $0 --uninstall        Remove the service
+    sudo $0                Install the service
+    sudo $0 --uninstall    Remove the service
 
 EOF
     exit 0
@@ -91,6 +79,13 @@ EOF
 
 check_prerequisites() {
     print_info "Checking prerequisites..."
+    
+    # Check for sudo/root
+    if [[ $EUID -ne 0 ]]; then
+        print_error "This script must be run as root (requires packet sniffing capabilities)."
+        print_info "Please run: sudo $0"
+        exit 1
+    fi
     
     # Check if systemd is available
     if ! command -v systemctl &> /dev/null; then
@@ -122,85 +117,48 @@ check_prerequisites() {
     if [[ ! -f "${VENV_PYTHON}" ]]; then
         print_warning "Virtual environment not found: ${PROJECT_DIR}/.venv"
         print_warning "Please create it with: python3 -m venv ${PROJECT_DIR}/.venv"
-        print_warning "And install dependencies: ${VENV_PYTHON} -m pip install -r requirements.txt"
+        print_warning "And install dependencies: ${VENV_PYTHON} -m pip install -r ${PROJECT_DIR}/requirements.txt"
+    fi
+    
+    # Check if .env file exists
+    if [[ ! -f "${PROJECT_DIR}/.env" ]]; then
+        print_warning ".env file not found: ${PROJECT_DIR}/.env"
+        print_warning "Service requires:"
+        print_warning "  - TELEGRAM_BOT_TOKEN"
+        print_warning "  - CHANNEL_ID_TechStats"
+        print_warning "  - CHANNEL_ID_Alerts"
+    fi
+    
+    # Check if buttons.ini exists
+    if [[ ! -f "${PROJECT_DIR}/config/buttons.ini" ]]; then
+        print_warning "Button configuration not found: ${PROJECT_DIR}/config/buttons.ini"
+        print_info "Run discovery mode to find button MAC addresses:"
+        print_info "  sudo ${PYTHON_SCRIPT} discover"
     fi
     
     print_success "Prerequisites check completed"
 }
 
 install_service() {
-    print_info "Installing ${SERVICE_NAME} in ${INSTALL_MODE} mode..."
-    
-    if [[ "${INSTALL_MODE}" == "system" ]]; then
-        install_system_service
-    else
-        install_user_service
-    fi
-}
-
-install_user_service() {
-    # Create user systemd directory if it doesn't exist
-    if [[ ! -d "${USER_SYSTEMD_DIR}" ]]; then
-        mkdir -p "${USER_SYSTEMD_DIR}"
-        print_success "Created directory: ${USER_SYSTEMD_DIR}"
-    fi
-    
-    # Copy service file
-    cp "${SERVICE_FILE}" "${USER_SYSTEMD_DIR}/${SERVICE_NAME}"
-    print_success "Copied service file to ${USER_SYSTEMD_DIR}/${SERVICE_NAME}"
-    
-    # Reload systemd daemon
-    systemctl --user daemon-reload
-    print_success "Reloaded systemd daemon"
-    
-    # Enable service
-    systemctl --user enable "${SERVICE_NAME}"
-    print_success "Enabled ${SERVICE_NAME}"
-    
-    # Start service
-    systemctl --user start "${SERVICE_NAME}"
-    print_success "Started ${SERVICE_NAME}"
-    
-    # Enable lingering (allows service to run even when user is not logged in)
-    if loginctl enable-linger "${USER}" 2>/dev/null; then
-        print_success "Enabled lingering for user ${USER}"
-        print_info "Service will now start automatically at boot"
-    else
-        print_warning "Could not enable lingering. Service will stop when you log out."
-        print_info "To enable it manually, run: sudo loginctl enable-linger ${USER}"
-    fi
-    
-    echo ""
-    print_success "Installation completed successfully!"
-    echo ""
-    print_info "Service status:"
-    systemctl --user status "${SERVICE_NAME}" --no-pager || true
-    
-    echo ""
-    print_info "Useful commands:"
-    echo "  Check status:    systemctl --user status ${SERVICE_NAME}"
-    echo "  View logs:       journalctl --user -u ${SERVICE_NAME} -f"
-    echo "  Stop service:    systemctl --user stop ${SERVICE_NAME}"
-    echo "  Restart service: systemctl --user restart ${SERVICE_NAME}"
-    echo "  Disable service: systemctl --user disable ${SERVICE_NAME}"
-}
-
-install_system_service() {
-    # Check for sudo
-    if [[ $EUID -ne 0 ]]; then
-        print_error "System-level installation requires root privileges."
-        print_info "Please run: sudo $0 --system"
-        exit 1
-    fi
+    print_info "Installing ${SERVICE_NAME} as system service..."
     
     # Create a temporary service file with substituted paths
     TEMP_SERVICE_FILE=$(mktemp)
-    sed "s|USER_TO_RUN_AS|${SUDO_USER:-${USER}}|g" "${SERVICE_FILE}" > "${TEMP_SERVICE_FILE}"
+    
+    # Replace %h with the actual project directory's parent (to avoid /root path issue)
+    # Since User=root and %h would resolve to /root, we need absolute paths
+    sed "s|%h/HomeEmergencyButton|${PROJECT_DIR}|g" "${SERVICE_FILE}" > "${TEMP_SERVICE_FILE}"
     
     # Copy service file
     cp "${TEMP_SERVICE_FILE}" "${SYSTEM_SYSTEMD_DIR}/${SERVICE_NAME}"
     rm "${TEMP_SERVICE_FILE}"
-    print_success "Copied service file to ${SYSTEM_SYSTEMD_DIR}/${SERVICE_NAME}"
+    print_success "Installed service file to ${SYSTEM_SYSTEMD_DIR}/${SERVICE_NAME}"
+    
+    # Show the actual paths being used
+    print_info "Service configuration:"
+    print_info "  Project directory: ${PROJECT_DIR}"
+    print_info "  Python script: ${PROJECT_DIR}/script/emergency_button_notificator.py"
+    print_info "  Virtual environment: ${PROJECT_DIR}/.venv"
     
     # Reload systemd daemon
     systemctl daemon-reload
@@ -218,6 +176,10 @@ install_system_service() {
     print_success "Installation completed successfully!"
     print_info "Service will start automatically at boot"
     echo ""
+    
+    # Wait a moment for service to start
+    sleep 2
+    
     print_info "Service status:"
     systemctl status "${SERVICE_NAME}" --no-pager || true
     
@@ -228,71 +190,43 @@ install_system_service() {
     echo "  Stop service:    sudo systemctl stop ${SERVICE_NAME}"
     echo "  Restart service: sudo systemctl restart ${SERVICE_NAME}"
     echo "  Disable service: sudo systemctl disable ${SERVICE_NAME}"
+    echo ""
+    print_info "Check recent logs:"
+    echo "  sudo journalctl -u ${SERVICE_NAME} -n 50 --no-pager"
 }
 
 uninstall_service() {
     print_info "Uninstalling ${SERVICE_NAME}..."
     
-    # Detect which mode is installed
-    USER_INSTALLED=false
-    SYSTEM_INSTALLED=false
-    
-    if [[ -f "${USER_SYSTEMD_DIR}/${SERVICE_NAME}" ]]; then
-        USER_INSTALLED=true
+    # Check for sudo/root
+    if [[ $EUID -ne 0 ]]; then
+        print_error "Service removal requires root privileges."
+        print_info "Please run: sudo $0 --uninstall"
+        exit 1
     fi
     
-    if [[ -f "${SYSTEM_SYSTEMD_DIR}/${SERVICE_NAME}" ]]; then
-        SYSTEM_INSTALLED=true
-    fi
-    
-    if [[ "${USER_INSTALLED}" == false ]] && [[ "${SYSTEM_INSTALLED}" == false ]]; then
+    # Check if service is installed
+    if [[ ! -f "${SYSTEM_SYSTEMD_DIR}/${SERVICE_NAME}" ]]; then
         print_warning "Service is not installed"
         exit 0
     fi
     
-    # Uninstall user service
-    if [[ "${USER_INSTALLED}" == true ]]; then
-        print_info "Removing user-level service..."
-        
-        if systemctl --user is-active --quiet "${SERVICE_NAME}"; then
-            systemctl --user stop "${SERVICE_NAME}"
-            print_success "Stopped user service"
-        fi
-        
-        if systemctl --user is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-            systemctl --user disable "${SERVICE_NAME}"
-            print_success "Disabled user service"
-        fi
-        
-        rm "${USER_SYSTEMD_DIR}/${SERVICE_NAME}"
-        systemctl --user daemon-reload
-        print_success "Removed user service file"
+    # Stop service if running
+    if systemctl is-active --quiet "${SERVICE_NAME}"; then
+        systemctl stop "${SERVICE_NAME}"
+        print_success "Stopped service"
     fi
     
-    # Uninstall system service
-    if [[ "${SYSTEM_INSTALLED}" == true ]]; then
-        if [[ $EUID -ne 0 ]]; then
-            print_error "System-level service removal requires root privileges."
-            print_info "Please run: sudo $0 --uninstall"
-            exit 1
-        fi
-        
-        print_info "Removing system-level service..."
-        
-        if systemctl is-active --quiet "${SERVICE_NAME}"; then
-            systemctl stop "${SERVICE_NAME}"
-            print_success "Stopped system service"
-        fi
-        
-        if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-            systemctl disable "${SERVICE_NAME}"
-            print_success "Disabled system service"
-        fi
-        
-        rm "${SYSTEM_SYSTEMD_DIR}/${SERVICE_NAME}"
-        systemctl daemon-reload
-        print_success "Removed system service file"
+    # Disable service if enabled
+    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        systemctl disable "${SERVICE_NAME}"
+        print_success "Disabled service"
     fi
+    
+    # Remove service file
+    rm "${SYSTEM_SYSTEMD_DIR}/${SERVICE_NAME}"
+    systemctl daemon-reload
+    print_success "Removed service file"
     
     echo ""
     print_success "Uninstallation completed successfully!"
@@ -305,23 +239,12 @@ main() {
         --help|-h)
             show_help
             ;;
-        --system)
-            INSTALL_MODE="system"
-            check_prerequisites
-            install_service
-            ;;
-        --user)
-            INSTALL_MODE="user"
-            check_prerequisites
-            install_service
-            ;;
         --uninstall)
             check_prerequisites
             uninstall_service
             ;;
         "")
-            # Default to user mode
-            INSTALL_MODE="user"
+            # Default: install
             check_prerequisites
             install_service
             ;;
