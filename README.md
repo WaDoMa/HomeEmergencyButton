@@ -88,6 +88,436 @@ This system exclusively uses `journalctl -k` (kernel messages from systemd journ
 - Stable power supply (recommended: official Raspberry Pi power supply)
 - Network connectivity (WiFi or Ethernet)
 - Amazon Dash buttons (one or more)
+- **Optional**: OpenWRT-compatible router (e.g., TP-Link Archer C7 v2) for advanced network configuration
+
+# Router Setup for Amazon Dash Buttons
+
+This section explains how to configure your network router to create an isolated WLAN for Amazon Dash buttons. The configuration ensures that:
+
+1. **Local Discovery Works**: Your Raspberry Pi and other devices on the LAN can detect and communicate with Dash buttons via ARP scans
+2. **Internet Access is Blocked**: Dash buttons cannot send data to Amazon servers or access the internet
+3. **Security is Maintained**: Buttons operate on a separate network segment with controlled access
+
+## Why Router Configuration Matters
+
+Amazon Dash buttons are designed to send purchase requests to Amazon when pressed. For this emergency alert system, we need to:
+
+- **Prevent unwanted orders**: Block internet access to stop buttons from contacting Amazon
+- **Enable local detection**: Allow ARP packet monitoring for emergency alerts
+- **Maintain reliability**: Ensure buttons can connect and remain responsive
+
+## Supported Router Types
+
+This guide focuses on **OpenWRT routers** because they offer:
+- Full control over network configuration via SSH
+- Advanced firewall capabilities for MAC-based filtering
+- Bridging between network segments for ARP visibility
+- UCI (Unified Configuration Interface) for scriptable setup
+
+### Tested Hardware
+
+- **TP-Link Archer C7 v2** running OpenWRT (fully tested with this project)
+- Other OpenWRT-compatible routers should work similarly
+
+### Alternative Routers
+
+If you're using a different router type:
+- **Commercial routers with "Guest Network"**: May work but often isolate guests completely (blocking ARP visibility)
+- **DD-WRT/Tomato firmware**: Similar concepts apply, but commands differ
+- **Consumer routers**: Usually lack the granular control needed for MAC-based internet blocking
+
+## Option 1: Dedicated Development Router (Recommended)
+
+Using a separate router for Dash button development is the cleanest approach.
+
+### Advantages
+
+- **Isolation**: Won't affect your main network
+- **Experimentation**: Safe to test configurations
+- **Portability**: Easy to move the entire setup
+- **Clean rollback**: Simply power off if issues arise
+
+### Network Topology
+
+```
+Internet
+   ↓
+Main Router (192.168.1.x)
+   ↓
+   ├─→ Your Computer (192.168.1.100)
+   └─→ OpenWRT Router WAN port
+          ↓
+       OpenWRT Router (192.168.2.1)
+          ↓
+          ├─→ Raspberry Pi LAN (192.168.2.50) ← Monitors via ARP
+          └─→ Dash Button WLAN (192.168.2.x) ← Internet blocked
+```
+
+### Setup Steps
+
+1. **Flash OpenWRT** on your TP-Link Archer C7 v2 (or compatible router)
+   - Download firmware from https://openwrt.org/
+   - Follow OpenWRT installation guide for your model
+
+2. **Initial OpenWRT Configuration**
+   ```bash
+   # Connect to router via Ethernet
+   ssh root@192.168.1.1
+   
+   # Set a root password
+   passwd
+   
+   # Configure WAN to get internet from main router
+   uci set network.wan.proto='dhcp'
+   uci commit network
+   /etc/init.d/network restart
+   ```
+
+3. **Run the Dash Button Configuration Script**
+   
+   See the [OpenWRT Configuration Script](#openwrt-configuration-script) section below.
+
+4. **Connect Raspberry Pi via Ethernet**
+   - Connect Pi to one of the OpenWRT router's LAN ports
+   - Pi will receive IP via DHCP (typically 192.168.2.x)
+
+5. **Connect Dash Buttons to the Dash WLAN**
+   - Use the button configuration script from the [Configure Emergency Buttons](#5-configure-emergency-buttons) section
+   - Connect buttons to the SSID you configured (e.g., "DashButton")
+
+## Option 2: Main Router Configuration (Advanced)
+
+If you want to use your main router and it's running OpenWRT, you can apply the same configuration.
+
+### Considerations
+
+- **Main network impact**: Configuration changes affect your entire network
+- **More complex**: Multiple network segments already exist
+- **IP conflicts**: Need to choose non-conflicting IP ranges
+- **Backup first**: Save your current router configuration
+
+### Modified Setup
+
+Change the script variables to avoid IP conflicts:
+
+```bash
+DASH_NETWORK="192.168.3.1"       # Use a different subnet from your main LAN
+DASH_NETMASK="255.255.255.0"
+```
+
+Then follow the same configuration script procedure.
+
+## OpenWRT Configuration Script
+
+This automated script configures your OpenWRT router with all necessary settings.
+
+### Features
+
+- Creates isolated WLAN network for Dash buttons
+- Bridges LAN and Dash network for ARP visibility
+- Blocks internet access by MAC address (supports multiple buttons)
+- Configures firewall rules for local communication
+- Uses 2.4GHz WiFi (required for Dash buttons)
+
+### Prerequisites
+
+- OpenWRT router with SSH access
+- Root password configured
+- Router connected to internet (for Raspberry Pi access)
+
+### Configuration Script
+
+The configuration script is located at `script/configure_openwrt_router.sh` in this repository.
+
+### Usage Instructions
+
+1. **Edit the Configuration Variables**
+   
+   Open `script/configure_openwrt_router.sh` and modify these values at the top:
+   
+   ```bash
+   DASH_SSID="DashButton"              # Your Dash button WLAN name
+   DASH_PASSWORD="YourSecurePass"      # WPA2 password (min 8 chars)
+   DASH_MAC_1="AA:BB:CC:DD:EE:FF"      # First button MAC address
+   DASH_MAC_2="11:22:33:44:55:66"      # Second button (optional)
+   DASH_MAC_3=""                       # Third button (optional)
+   ```
+   
+   **Finding MAC Addresses**: Use the discovery mode (explained later in this README):
+   ```bash
+   sudo python3 script/emergency_alert_agent.py discover
+   ```
+
+2. **Make the Script Executable**
+   ```bash
+   chmod +x script/configure_openwrt_router.sh
+   ```
+
+3. **Copy Script to Your Router**
+   ```bash
+   scp script/configure_openwrt_router.sh root@192.168.1.1:/tmp/
+   # Replace 192.168.1.1 with your router's IP address
+   ```
+
+4. **Connect to Your Router and Execute**
+   ```bash
+   ssh root@192.168.1.1
+   cd /tmp
+   ./configure_openwrt_router.sh
+   ```
+   
+   Wait for completion (about 10-15 seconds)
+
+5. **Verify Configuration**
+   
+   The script automatically shows a summary. You can also verify manually:
+   
+   ```bash
+   # Check network interfaces
+   uci show network | grep dash
+   
+   # Check wireless configuration
+   uci show wireless | grep -A 10 wifi-iface
+   
+   # Check firewall rules
+   uci show firewall | grep -A 5 'dash\|Dash'
+   
+   # View active firewall rules
+   iptables -L -v -n | grep -A 3 dash
+   ```
+
+6. **Test Connectivity**
+   
+   From your Raspberry Pi (connected via LAN):
+   
+   ```bash
+   # Scan for devices on the Dash network
+   sudo arp-scan --interface=eth0 192.168.2.0/24
+   
+   # Or scan local network
+   sudo arp-scan --interface=eth0 --localnet
+   
+   # Ping the Dash network gateway
+   ping 192.168.2.1
+   ```
+   
+   After connecting a Dash button to the WLAN:
+   
+   ```bash
+   # The button should appear in ARP scans when pressed
+   sudo arp-scan --interface=eth0 192.168.2.0/24
+   ```
+
+## Troubleshooting Router Configuration
+
+### Button Can't Connect to WLAN
+
+**Check wireless configuration:**
+```bash
+uci show wireless
+```
+
+**Common issues:**
+- Radio disabled: `uci set wireless.radio0.disabled='0'`
+- Wrong password length (must be 8+ characters)
+- Button only supports 2.4GHz (verify you're using radio0, not radio1)
+
+**Restart wireless:**
+```bash
+wifi reload
+```
+
+### Raspberry Pi Can't See Dash Buttons
+
+**Verify network bridging:**
+```bash
+brctl show
+# Should show both LAN and Dash interfaces in bridge
+```
+
+**Check firewall forwarding:**
+```bash
+uci show firewall | grep forwarding
+# Should show rules allowing traffic between 'lan' and 'dash'
+```
+
+**Test connectivity:**
+```bash
+# From Raspberry Pi, ping the Dash network gateway
+ping 192.168.2.1
+
+# Check routing table
+ip route show
+```
+
+### Dash Button Still Has Internet Access
+
+**Verify MAC address is correct:**
+```bash
+# Check firewall rules
+iptables -L -v -n | grep -i "AA:BB:CC:DD:EE:FF"
+```
+
+**Test from router:**
+```bash
+# Monitor firewall rejections (run this, then press button)
+logread -f | grep -i reject
+```
+
+**Common issues:**
+- MAC address typed incorrectly
+- MAC address in wrong format (use colons, not dashes)
+- Firewall rules not applied: `uci commit firewall && /etc/init.d/firewall restart`
+
+### ARP Scans Show Nothing
+
+**Verify button is connected:**
+```bash
+# Check wireless clients
+iw dev wlan0 station dump
+```
+
+**Check DHCP leases:**
+```bash
+cat /tmp/dhcp.leases
+# Should show entries for the Dash network (192.168.2.x)
+```
+
+**Test ARP visibility:**
+```bash
+# From router, scan Dash network
+arp-scan --interface=br-dash 192.168.2.0/24
+```
+
+### Configuration Rollback
+
+If something goes wrong, you can rollback:
+
+```bash
+# Rollback all changes
+uci revert network
+uci revert wireless
+uci revert firewall
+uci revert dhcp
+
+# Restart services
+/etc/init.d/network restart
+/etc/init.d/firewall restart
+wifi reload
+```
+
+Or simply reboot the router:
+```bash
+reboot
+```
+
+## Security Considerations
+
+### Network Isolation
+
+- **Dash buttons are blocked from internet** via MAC-based firewall rules
+- **LAN devices can communicate with Dash network** for monitoring purposes
+- **Dash buttons can communicate with each other** (within WLAN)
+
+### Wireless Security
+
+- **WPA2 encryption** protects the Dash button WLAN
+- **Hidden SSID option**: Add `uci set wireless.@wifi-iface[-1].hidden='1'` to hide SSID
+- **MAC filtering**: Only configured buttons should be allowed (additional ACL rules possible)
+
+### Router Access
+
+- **Change default password**: `passwd`
+- **Disable WAN SSH access**: `uci set dropbear.@dropbear[0].Interface='lan'`
+- **Enable HTTPS for LuCI**: Install `luci-ssl` package
+
+### Best Practices
+
+1. **Document your configuration**: Save the script and variables
+2. **Backup router config**: Use LuCI web interface → System → Backup/Flash Firmware
+3. **Monitor firewall logs**: `logread -f | grep firewall`
+4. **Regular updates**: Keep OpenWRT firmware updated
+
+## Alternative Router Solutions
+
+### Using Standard Consumer Routers
+
+If you don't have OpenWRT:
+
+**Option A: Guest Network (Limited)**
+- Create a guest network for Dash buttons
+- Note: Most routers fully isolate guests (ARP won't work)
+- You may need to connect the Raspberry Pi to the guest network too
+
+**Option B: VLAN Tagging (Advanced)**
+- Some prosumer routers support VLAN configuration
+- Create a VLAN for Dash buttons
+- Configure firewall rules to block internet per VLAN
+- Requires managed switch for LAN devices
+
+**Option C: Raspberry Pi as Router (Complex)**
+- Use the Raspberry Pi itself as a WiFi access point
+- Requires USB WiFi adapter or Pi with built-in WiFi
+- More complex but gives full control
+- See: RaspAP or hostapd configuration
+
+### Comparison Table
+
+| Method | ARP Visibility | Internet Blocking | Difficulty | Cost |
+|--------|---------------|-------------------|------------|------|
+| OpenWRT Dedicated | ✅ Full | ✅ MAC-based | Medium | $30-60 |
+| OpenWRT Main Router | ✅ Full | ✅ MAC-based | Hard | $0 |
+| Consumer Guest Net | ❌ Usually blocked | ✅ Network-based | Easy | $0 |
+| VLAN Config | ✅ With proper setup | ✅ VLAN-based | Very Hard | $100+ |
+| Pi as Router | ✅ Full | ✅ iptables | Hard | $10-20 |
+
+**Recommendation**: Use a dedicated OpenWRT router for the best balance of control, cost, and simplicity.
+
+## Testing the Complete Setup
+
+Once everything is configured:
+
+1. **Verify Raspberry Pi Connectivity**
+   ```bash
+   # Pi should have IP on Dash network
+   ip addr show
+   # Should show: 192.168.2.x
+   
+   # Pi should reach internet via router
+   ping 8.8.8.8
+   ```
+
+2. **Connect Dash Buttons**
+   ```bash
+   # Use the button configuration from the section below
+   ./script/dash_diagnostic.sh
+   ```
+
+3. **Test Button Detection**
+   ```bash
+   # Run discovery mode on Raspberry Pi
+   sudo python3 script/emergency_alert_agent.py discover
+   
+   # Press buttons - they should appear
+   ```
+
+4. **Verify Internet Blocking**
+   ```bash
+   # From router, monitor button traffic
+   tcpdump -i br-dash host AA:BB:CC:DD:EE:FF
+   
+   # Press button, should see ARP but no internet traffic
+   ```
+
+5. **Test Emergency System**
+   ```bash
+   # Start the service
+   sudo systemctl start emergency_button.service
+   
+   # Press button - should receive Telegram alert
+   ```
+
+---
 
 ### Software
 
@@ -170,6 +600,32 @@ DEBUG=false
 **Security note**: Never commit the `.env` file to version control. It's already included in `.gitignore`.
 
 ### 5. Configure Emergency Buttons
+
+#### Pair your Buttons with your router
+
+- For entering configuration mode, press button until blue LED lights up. 
+- Check condition by calling address *http://192.168.0.1/* in your browser or enter
+```bash
+curl "http://192.168.0.1"
+
+```
+- Programm button with your WIFI-credentials by
+```bash
+curl "http://192.168.0.1/?amzn_ssid=YOUR_WIFI_SSID&amzn_pw=YOUR_WIFI_PASSWORD"
+```
+or by
+```bash
+curl -X POST -d "amzn_ssid=YOUR_WIFI_SSID&amzn_pw=YOUR_WIFI_PASSWORD" http://192.168.0.1/
+```
+or call the script "configure_dash.sh" like this
+```bash
+chmod +x dash_diagnostic.sh
+./script/dash_diagnostic.sh
+```
+or with custom paramters
+```bash
+./dash_diagnostic.sh 192.168.0.1 YourWiFiSSID YourWiFiPassword
+```
 
 #### Discover Your Dash Button MAC Addresses
 
@@ -345,7 +801,7 @@ Once the service is running, simply press your configured Dash buttons. You shou
 2. Button identification and timestamp
 3. Console log entry (visible via `journalctl`)
 
-**Note**: Buttons have built-in debouncing (5 seconds) to prevent duplicate alerts from repeated presses.
+**Note**: Buttons have built-in debouncing (e.g. 60 seconds) to prevent duplicate alerts from repeated presses or from botton still being in ARP list of your router.
 
 ### Uninstalling the Service
 ```bash
@@ -366,8 +822,8 @@ HomeEmergencyButton/
 │   └── emergency_button.service           # Systemd service definition
 ├── config/
 │   └── buttons.ini                        # Dash button configuration
-├── .venv/                                 # Python virtual environment
-├── .env                                   # Environment variables (not in git)
+├── .venv/                                 # Python virtual environment (not in git - to be created locally during installation)
+├── .env                                   # Environment variables (not in git - to be created locally by user)
 ├── .gitignore                             # Git ignore rules
 ├── requirements.txt                       # Python dependencies
 └── README.md                              # This file
@@ -438,16 +894,16 @@ The button detection system uses:
 
 1. **Scapy ARP monitoring**: Detects when Dash buttons send ARP packets (happens on button press)
 2. **Thread-based sniffing**: Runs packet capture in a separate thread to not block asyncio
-3. **Debouncing**: 5-second window to prevent duplicate alerts
+3. **Debouncing**: n-second window to prevent duplicate alerts
 4. **Async messaging**: Thread-safe integration with Telegram bot using `asyncio.run_coroutine_threadsafe()`
 
 ### Contributing
 
 When developing new features:
 
-1. **Test filesystem operations** thoroughly - the system monitors critical storage
+1. **Emphasize host stability** - the system is part of a emrgency alerting chain
 2. **Handle errors gracefully** - functions should return empty results rather than crash
-3. **Use journalctl for kernel monitoring** - don't add dmesg dependencies
+3. **Use journalctl for kernel monitoring** - don't add dmesg dependencies as these do not survice beyond next boot
 4. **Test button detection** - verify ARP packet handling and debouncing
 5. **Maintain thread safety** - ensure proper async/thread integration
 6. **Update documentation** - keep README and docstrings current
@@ -619,18 +1075,22 @@ sudo systemctl restart systemd-journald
 ### Q: How do I change the debounce time?
 **A**: Edit `BUTTON_DEBOUNCE_SECONDS` in `emergency_alert_agent.py` and restart the service.
 
+### Q: Do I need an OpenWRT router?
+**A**: Not necessarily. OpenWRT provides the most control for blocking internet access while maintaining ARP visibility. You can use other solutions, but they may have limitations (see the [Alternative Router Solutions](#alternative-router-solutions) section).
+
+### Q: Can the Raspberry Pi and Dash buttons be on different networks?
+**A**: No, they need to be on the same network segment (or bridged networks) for ARP packet detection to work. This is why the OpenWRT configuration creates a bridged setup.
+
 ## License
 
-[Specify your license here]
+GPL-3
 
 ## Acknowledgments
 
-- Raspberry Pi Foundation for the hardware platform
-- Telegram for the Bot API
-- Amazon for Dash buttons
+- The Python community for standard libraries
 - Scapy developers for packet sniffing capabilities
-- The Python community for excellent libraries
-- systemd project for robust logging infrastructure
+- Telegram for providing an official Bot API
+- OpenWRT community for router firmware and documentation
 
 ## Support
 
@@ -649,6 +1109,7 @@ For issues, questions, or contributions:
 - Added thread-safe async messaging for button events
 - Enhanced error handling and logging
 - Updated documentation with button configuration guide
+- Added comprehensive OpenWRT router setup documentation
 
 ### Version 1.0
 - Initial release with system health monitoring
