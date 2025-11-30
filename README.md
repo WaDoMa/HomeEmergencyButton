@@ -142,15 +142,15 @@ Using a separate router for Dash button development is the cleanest approach.
 ```
 Internet
    ↓
-Main Router (192.168.1.x)
+Main Router (192.168.x.x)
    ↓
-   ├─→ Your Computer (192.168.1.100)
+   ├─→ Your Computer (192.168.y.y)
    └─→ OpenWRT Router WAN port
           ↓
        OpenWRT Router (192.168.2.1)
           ↓
           ├─→ Raspberry Pi LAN (192.168.2.50) ← Monitors via ARP
-          └─→ Dash Button WLAN (192.168.2.x) ← Internet blocked
+          └─→ Dash Button WLAN (192.168.2.z) ← Internet blocked
 ```
 
 ### Setup Steps
@@ -162,7 +162,7 @@ Main Router (192.168.1.x)
 2. **Initial OpenWRT Configuration**
    ```bash
    # Connect to router via Ethernet
-   ssh root@192.168.1.1
+   ssh root@OpenWRT
    
    # Set a root password
    passwd
@@ -248,24 +248,18 @@ The configuration script is located at `script/configure_openwrt_router.sh` in t
    sudo python3 script/emergency_alert_agent.py discover
    ```
 
-2. **Make the Script Executable**
+2. **Option A: Using `cat` to pipe the script**
    ```bash
-   chmod +x script/configure_openwrt_router.sh
-   ```
+    # From your LAN machine, pipe the script directly through SSH
+    cat script/configure_openwrt_router.sh | ssh root@OpenWRT 'sh -s'
+    ```
 
-3. **Copy Script to Your Router**
-   ```bash
-   scp script/configure_openwrt_router.sh root@192.168.1.1:/tmp/
-   # Replace 192.168.1.1 with your router's IP address
-   ```
+    **Option B: Using input redirection**
+    ```bash
+    # From your LAN machine, redirect the script file into SSH
+    ssh root@OpenWRT 'sh -s' < script/configure_openwrt_router.sh
+    ```
 
-4. **Connect to Your Router and Execute**
-   ```bash
-   ssh root@192.168.1.1
-   cd /tmp
-   ./configure_openwrt_router.sh
-   ```
-   
    Wait for completion (about 10-15 seconds)
 
 5. **Verify Configuration**

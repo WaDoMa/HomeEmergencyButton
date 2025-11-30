@@ -1,14 +1,11 @@
 #!/bin/sh
 # OpenWRT Configuration Script for TP-Link Archer C7 v2
-# Purpose: Create isolated WLAN for Amazon Dash Button with local access but no internet
+# Purpose: Create isolated WLAN for Amazon Dash Buttons with local access but no internet
 # 
 # EDIT THESE VARIABLES BEFORE RUNNING:
 DASH_SSID="DashButton"           # SSID for the Dash Button WLAN
 DASH_PASSWORD="YourSecurePass"   # WPA2 password (min 8 characters)
-DASH_MAC_1="AA:BB:CC:DD:EE:FF"   # MAC address of first Amazon Dash Button
-DASH_MAC_2=""                    # MAC address of second Dash Button (optional, leave empty if not used)
-DASH_MAC_3=""                    # MAC address of third Dash Button (optional)
-MAIN_SSID="YourMainWiFi"         # Your main WiFi SSID (optional, for reference)
+DASH_MACS="AA:BB:CC:DD:EE:FF,11:22:33:44:55:66,AA:BB:CC:DD:EE:00"  # Comma-separated list of Dash Button MAC addresses
 
 # Network configuration
 DASH_NETWORK="192.168.2.1"       # IP for the dash network gateway
@@ -18,10 +15,22 @@ DASH_DHCP_LIMIT="50"
 
 echo "=== Starting OpenWRT Configuration ==="
 echo "This script will:"
-echo "1. Create a new WLAN interface for Dash Button"
+echo "1. Create a new WLAN interface for Dash Buttons"
 echo "2. Set up a separate network zone with local access"
-echo "3. Block internet access for the Dash Button MAC"
-echo "4. Allow LAN devices to discover the Dash Button"
+echo "3. Block internet access for all configured Dash Button MACs"
+echo "4. Allow LAN devices to discover the Dash Buttons"
+echo ""
+
+# Parse MAC addresses from comma-separated list
+IFS=',' read -ra MAC_ARRAY <<< "$DASH_MACS"
+MAC_COUNT=${#MAC_ARRAY[@]}
+
+echo "Found $MAC_COUNT Dash Button MAC address(es) to configure"
+for i in "${!MAC_ARRAY[@]}"; do
+    # Trim whitespace
+    MAC_ARRAY[$i]=$(echo "${MAC_ARRAY[$i]}" | xargs)
+    echo "  [$((i+1))] ${MAC_ARRAY[$i]}"
+done
 echo ""
 
 # ============================================================================
@@ -47,7 +56,7 @@ uci commit network
 uci commit dhcp
 
 # ============================================================================
-# STEP 2: Create separate WLAN for Dash Button
+# STEP 2: Create separate WLAN for Dash Buttons
 # ============================================================================
 echo "[2/6] Creating separate WLAN interface..."
 
@@ -98,41 +107,31 @@ uci set firewall.@forwarding[-1].dest='dash'
 # ============================================================================
 echo "[4/6] Creating firewall rules to block Dash Button internet access..."
 
-# Block traffic from first Dash Button MAC to WAN
-if [ -n "$DASH_MAC_1" ]; then
+# Loop through all MAC addresses and create blocking rules
+for i in "${!MAC_ARRAY[@]}"; do
+    MAC="${MAC_ARRAY[$i]}"
+    
+    # Skip empty MAC addresses
+    if [ -z "$MAC" ]; then
+        continue
+    fi
+    
+    # Validate MAC address format (basic check)
+    if ! echo "$MAC" | grep -qE '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'; then
+        echo "  ⚠ WARNING: Invalid MAC address format: $MAC (skipping)"
+        continue
+    fi
+    
+    # Create firewall rule to block this MAC from accessing WAN
     uci add firewall rule
-    uci set firewall.@rule[-1].name='Block Dash Button 1 Internet'
+    uci set firewall.@rule[-1].name="Block Dash Button $((i+1)) Internet"
     uci set firewall.@rule[-1].src='dash'
     uci set firewall.@rule[-1].dest='wan'
-    uci set firewall.@rule[-1].src_mac="$DASH_MAC_1"
+    uci set firewall.@rule[-1].src_mac="$MAC"
     uci set firewall.@rule[-1].target='REJECT'
     uci set firewall.@rule[-1].enabled='1'
-    echo "  → Blocked MAC: $DASH_MAC_1"
-fi
-
-# Block traffic from second Dash Button MAC to WAN (if configured)
-if [ -n "$DASH_MAC_2" ]; then
-    uci add firewall rule
-    uci set firewall.@rule[-1].name='Block Dash Button 2 Internet'
-    uci set firewall.@rule[-1].src='dash'
-    uci set firewall.@rule[-1].dest='wan'
-    uci set firewall.@rule[-1].src_mac="$DASH_MAC_2"
-    uci set firewall.@rule[-1].target='REJECT'
-    uci set firewall.@rule[-1].enabled='1'
-    echo "  → Blocked MAC: $DASH_MAC_2"
-fi
-
-# Block traffic from third Dash Button MAC to WAN (if configured)
-if [ -n "$DASH_MAC_3" ]; then
-    uci add firewall rule
-    uci set firewall.@rule[-1].name='Block Dash Button 3 Internet'
-    uci set firewall.@rule[-1].src='dash'
-    uci set firewall.@rule[-1].dest='wan'
-    uci set firewall.@rule[-1].src_mac="$DASH_MAC_3"
-    uci set firewall.@rule[-1].target='REJECT'
-    uci set firewall.@rule[-1].enabled='1'
-    echo "  → Blocked MAC: $DASH_MAC_3"
-fi
+    echo "  → Blocked MAC [$((i+1))]: $MAC"
+done
 
 uci commit firewall
 
@@ -170,19 +169,25 @@ echo ""
 echo "Summary:"
 echo "- New WLAN SSID: $DASH_SSID"
 echo "- Dash network: $DASH_NETWORK/$DASH_NETMASK"
-[ -n "$DASH_MAC_1" ] && echo "- Blocked MAC 1: $DASH_MAC_1"
-[ -n "$DASH_MAC_2" ] && echo "- Blocked MAC 2: $DASH_MAC_2"
-[ -n "$DASH_MAC_3" ] && echo "- Blocked MAC 3: $DASH_MAC_3"
+echo "- Configured $MAC_COUNT Dash Button(s):"
+for i in "${!MAC_ARRAY[@]}"; do
+    MAC="${MAC_ARRAY[$i]}"
+    [ -n "$MAC" ] && echo "  [$((i+1))] $MAC"
+done
 echo ""
 echo "What you can do now:"
-echo "1. Connect your Amazon Dash Button to SSID: $DASH_SSID"
+echo "1. Connect your Amazon Dash Button(s) to SSID: $DASH_SSID"
 echo "2. From your LAN machine, scan with: sudo arp-scan --interface=eth0 --localnet"
 echo "   Or scan dash network: sudo arp-scan 192.168.2.0/24"
-echo "3. The Dash Button can be discovered by devices in LAN and dash networks"
-echo "4. The Dash Button CANNOT access the internet"
+echo "3. The Dash Buttons can be discovered by devices in LAN and dash networks"
+echo "4. The Dash Buttons CANNOT access the internet"
 echo ""
 echo "To verify configuration:"
 echo "  uci show network | grep dash"
 echo "  uci show wireless | grep -A 10 wifi-iface"
 echo "  uci show firewall | grep -A 5 'dash\|Dash'"
+echo ""
+echo "To add more Dash Buttons later:"
+echo "  Edit this script and update DASH_MACS, then run again"
+echo "  Or manually add firewall rules via LuCI web interface"
 echo ""
