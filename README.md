@@ -44,7 +44,6 @@ Emergency Alert Agent starts → Sends system health report (once) →
 Monitors for button presses (continuous) →
 Sends emergency alerts on button events
 ```
-
 ### Dual Channel Strategy
 
 The system uses two separate Telegram channels for different purposes:
@@ -69,7 +68,7 @@ The system aggregates information from multiple sources:
 - **journalctl**: System journal entries (kernel messages from last 7 days, persistent across reboots)
 - **systemd-fsck**: Filesystem check service logs (since current boot)
 - **df**: Disk usage statistics
-- **ARP packets**: Network traffic for Dash button detection (via scapy)
+- **ARP packets**: Network traffic for Dash button detection (via arp-scan)
 
 ### Key Design Decision: journalctl vs dmesg
 
@@ -87,7 +86,7 @@ This system exclusively uses `journalctl -k` (kernel messages from systemd journ
 - Raspberry Pi (any model with SD card storage)
 - Stable power supply (recommended: official Raspberry Pi power supply)
 - Network connectivity (WiFi or Ethernet)
-- Amazon Dash buttons (one or more)
+- Amazon Dash buttons (one or more, with per-button debounce configurable)
 - **Optional**: OpenWRT-compatible router (e.g., TP-Link Archer C7 v2) for advanced network configuration
 
 # Router Setup for Amazon Dash Buttons
@@ -543,13 +542,12 @@ pip install -r requirements.txt
 **Required Python packages:**
 - `python-telegram-bot` - Telegram Bot API wrapper
 - `python-dotenv` - Environment variable management
-- `scapy` - Network packet sniffing for button detection
 - `nest-asyncio` - Asyncio compatibility for interactive environments
 
-**System dependencies for Scapy (if not already installed):**
+**System dependencies for arp-scan (if not already installed):**
 ```bash
 # Debian/Ubuntu/Raspberry Pi OS
-sudo apt-get install python3-dev libpcap-dev
+sudo apt-get install arp-scan
 ```
 
 ### 4. Configure Telegram
@@ -886,10 +884,9 @@ Key monitoring patterns:
 
 The button detection system uses:
 
-1. **Scapy ARP monitoring**: Detects when Dash buttons send ARP packets (happens on button press)
-2. **Thread-based sniffing**: Runs packet capture in a separate thread to not block asyncio
-3. **Debouncing**: n-second window to prevent duplicate alerts
-4. **Async messaging**: Thread-safe integration with Telegram bot using `asyncio.run_coroutine_threadsafe()`
+1. **arp-scan-based monitoring**: Detects when Dash buttons send ARP packets (happens on button press)
+2. **Debouncing**: n-second window to prevent duplicate alerts
+3. **Async messaging**: Thread-safe integration with Telegram bot using `asyncio.run_coroutine_threadsafe()`
 
 ### Contributing
 
@@ -992,7 +989,6 @@ Common issues:
 - Service not running as root (required for packet sniffing)
 - Incorrect MAC addresses in configuration
 - Buttons on different network/VLAN
-- Scapy dependencies not installed
 
 #### No Telegram Messages
 
@@ -1081,8 +1077,6 @@ GPL-3
 
 ## Acknowledgments
 
-- The Python community for standard libraries
-- Scapy developers for packet sniffing capabilities
 - Telegram for providing an official Bot API
 - OpenWRT community for router firmware and documentation
 
@@ -1092,13 +1086,13 @@ For issues, questions, or contributions:
 - **GitHub Issues**: https://github.com/WaDoMa/HomeEmergencyButton/issues
 - **Documentation**: https://github.com/WaDoMa/HomeEmergencyButton/README.md
 
-## Changelog
+# Changelog
 
 ### Version 2.0 (Current)
 - Added Amazon Dash button detection via ARP packet monitoring
+- Implemented **per-button debounce times** for customizable alert intervals
 - Implemented dual Telegram channel architecture (Tech Stats + Emergency Alerts)
 - Added button discovery mode for MAC address identification
-- Implemented debouncing for button presses
 - Changed system reports to once-per-boot instead of periodic
 - Added thread-safe async messaging for button events
 - Enhanced error handling and logging

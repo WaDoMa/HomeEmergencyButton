@@ -16,48 +16,6 @@ Modules:
 - telegram: Sending messages via Telegram API
 - scapy: Network packet sniffing for Dash button detection
 
-Amazon Dash Button Monitoring (Polling-Based)
-
-This module implements polling-based detection of Amazon Dash button presses
-using `arp-scan`. It is designed for environments where passive packet sniffing
-(e.g., via scapy) is unreliable or unavailable, such as managed switches,
-Wi-Fi isolation, or restricted network setups.
-
-The module periodically scans the local network for known button MAC addresses.
-A button press is inferred when a configured MAC address appears in the ARP scan
-results. Detected presses are debounced to prevent duplicate alerts caused by
-repeated network announcements during a single button press.
-
-Key characteristics
--------------------
-- Polling-based detection using `arp-scan`
-- Thread-based execution to avoid blocking the asyncio event loop
-- Time-based debouncing using monotonic clock
-- Thread-safe scheduling of Telegram notifications
-- Suitable for long-running service execution (e.g., systemd on Raspberry Pi)
-
-Typical workflow
-----------------
-1. Load configured button MAC addresses from `buttons.ini`
-2. Start the polling monitor in a background daemon thread
-3. Detect button appearances via ARP scans
-4. Apply debounce logic per MAC address
-5. Dispatch alert messages to Telegram via the main asyncio loop
-
-Design notes
-------------
-- This module intentionally avoids asyncio for network scanning, as `arp-scan`
-  is a blocking subprocess and better suited for execution in a background thread.
-- Telegram messages are scheduled into the main asyncio event loop using
-  `asyncio.run_coroutine_threadsafe()` to maintain thread safety.
-- Detection latency depends on the polling interval and network behavior.
-
-Limitations
------------
-- Requires root privileges to run `arp-scan`
-- Detection is not instantaneous and depends on scan frequency
-- Not suitable for high-frequency or low-latency input devices
-
 Author: Your Name
 Created on: YYYY-MM-DD
 """
@@ -71,23 +29,21 @@ import pathlib as pth
 import typing as typ
 import dataclasses as dc
 import configparser as cfg
-import time
 import datetime as dt_lib
 import signal
 import threading
-
 
 # Third-party
 import dotenv as dt
 import telegram as tg
 import telegram.error as tg_error
+import scapy.all as scapy
 
 
 # ------------------- Configuration ------------------- #
 APP_NAME = "Emergency Alerting Notificator"
 PROJECT_DIR = pth.Path(__file__).parents[1]
 CONFIG_PATH = PROJECT_DIR / 'config' / 'buttons.ini'
-ARP_SCAN_CMD = ["arp-scan", "--localnet", "--plain"]
 
 # Monitoring configuration
 SD_DEVICE = "mmcblk0"
@@ -104,11 +60,7 @@ POWER_IGNORE_PATTERNS = [
 DEFAULT_LOOKBACK_DAYS = 7
 
 # Button detection settings
-BUTTON_DEBOUNCE_SECONDS = 30  # Ignore repeated presses within this time
-
-# Timing settings for active polling
-SCAN_INTERVAL = 2   # seconds between consecutive arp-scan polls
-SCAN_DURATION = 60  # seconds for discovering by arp-scan polls
+BUTTON_DEBOUNCE_SECONDS = 5  # Ignore repeated presses within this time
 
 
 # ------------------- Global State ------------------- #
@@ -117,7 +69,6 @@ class GlobalState:
     def __init__(self):
         self.running = True
         self.last_button_press = {}  # MAC -> timestamp for debouncing
-        self.debounce_lock = threading.Lock()
         self.telegram_bot = None
         self.channel_id_alerts = None
         self.channel_id_tech_stats = None
@@ -162,7 +113,6 @@ class SystemReport:
 def load_config_section(config_path: pth.Path, section: str) -> dict[str, str]:
     """
     Read a section from an INI configuration file.
-    All keys (e.g., MAC addresses) are converted to lowercase.
 
     Parameters
     ----------
@@ -174,7 +124,7 @@ def load_config_section(config_path: pth.Path, section: str) -> dict[str, str]:
     Returns
     -------
     dict[str, str]
-        Dictionary of key-value pairs from the section in lowercase.
+        Dictionary of key-value pairs from the section.
 
     Raises
     ------
@@ -188,8 +138,7 @@ def load_config_section(config_path: pth.Path, section: str) -> dict[str, str]:
     if not parser.has_section(section):
         raise ValueError(f"Section '{section}' not found in {config_path}")
 
-    # Convert keys to lowercase for consistent MAC comparison
-    return {k.lower(): v for k, v in parser.items(section)}
+    return dict(parser.items(section))
 
 
 def run_command(cmd: list[str], max_lines: typ.Optional[int] = None) -> str:
@@ -230,47 +179,6 @@ def run_command(cmd: list[str], max_lines: typ.Optional[int] = None) -> str:
         return output
     except (subprocess.TimeoutExpired, subprocess.SubprocessError):
         return ""
-
-
-def run_arp_scan() -> set[str]:
-    """
-    Scan the local network for devices using arp-scan and return their MAC addresses.
-
-    This function executes the arp-scan command configured in ARP_SCAN_CMD,
-    captures its output, and extracts all detected MAC addresses as a set of
-    lowercase strings. It relies on the generic run_command() helper for
-    consistent subprocess execution and error handling.
-
-    Returns
-    -------
-    set[str]
-        A set containing the MAC addresses of all devices detected on the local
-        network. Each MAC address is returned in lowercase format.
-
-    Notes
-    -----
-    - Only lines containing a colon (':') in the second whitespace-separated
-      field are considered valid MAC addresses.
-    - This function can be called repeatedly for polling-based detection of
-      devices such as Amazon Dash buttons.
-    - ARP_SCAN_CMD can be configured to include additional options or a specific
-      network interface.
-
-    Example
-    -------
-    >>> macs = run_arp_scan()
-    >>> if "ac:63:be:xx:xx:xx" in macs:
-    ...     print("Carry-Button pressed!")
-    """
-    output = run_command(ARP_SCAN_CMD)
-    macs = set()
-
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and ':' in parts[1]:
-            macs.add(parts[1].lower())
-
-    return macs
 
 
 def filter_lines(
@@ -494,9 +402,8 @@ async def send_telegram_message(bot_token: str, chat_id: str, message: str) -> b
 
 def send_telegram_sync(chat_id: str, message: str):
     """
-    Synchronous wrapper to send a Telegram message from a thread-safe context.
-    Works even if called from a background thread.
-
+    Synchronous wrapper to send Telegram message from non-async context.
+    
     Parameters
     ----------
     chat_id : str
@@ -507,7 +414,7 @@ def send_telegram_sync(chat_id: str, message: str):
     if not STATE.telegram_bot or not STATE.loop:
         print("Error: Telegram bot not initialized", file=sys.stderr)
         return
-
+    
     async def _send():
         try:
             await STATE.telegram_bot.send_message(chat_id=chat_id, text=message)
@@ -515,14 +422,12 @@ def send_telegram_sync(chat_id: str, message: str):
                 print(f"✓ Alert sent to {chat_id}")
         except tg_error.TelegramError as e:
             print(f"✗ Failed to send alert: {e}", file=sys.stderr)
-
-    # Correct: schedule in the running event loop
-    try:
-        asyncio.run_coroutine_threadsafe(_send(), STATE.loop)
-    except RuntimeError as e:
-        print(f"✗ Failed to schedule Telegram message: {e}", file=sys.stderr)
+    
+    # Schedule coroutine in the event loop
+    asyncio.run_coroutine_threadsafe(_send(), STATE.loop)
 
 
+# ------------------- Dash Button Detection ------------------- #
 def is_debounced(mac_address: str) -> bool:
     """
     Check if button press should be debounced.
@@ -537,14 +442,15 @@ def is_debounced(mac_address: str) -> bool:
     bool
         True if press should be ignored (too soon after last press).
     """
-    now = time.monotonic()
-    with STATE.debounce_lock:
-        last_seen = STATE.last_button_press.get(mac_address, 0.0)    
-        if (now - last_seen) < BUTTON_DEBOUNCE_SECONDS:
-            return True    
-        # Record this press
-        STATE.last_button_press[mac_address] = now
-        return False
+    now = dt_lib.datetime.now()
+    
+    if mac_address in STATE.last_button_press:
+        time_since_last = (now - STATE.last_button_press[mac_address]).total_seconds()
+        if time_since_last < BUTTON_DEBOUNCE_SECONDS:
+            return True
+    
+    STATE.last_button_press[mac_address] = now
+    return False
 
 
 def handle_button_press(mac_address: str, button_name: str):
@@ -560,13 +466,13 @@ def handle_button_press(mac_address: str, button_name: str):
     """
     if is_debounced(mac_address):
         if STATE.debug:
-            print(f"⏱ Debounced press: {button_name} ({mac_address})")
+            print(f"Debounced: {button_name} ({mac_address})")
         return
-
+    
     timestamp = dt_lib.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
     print(f"\n🚨 [{timestamp}] EMERGENCY: {button_name} pressed! (MAC: {mac_address})")
-
+    
+    # Format alert message
     alert_message = (
         f"🚨 EMERGENCY ALERT 🚨\n\n"
         f"Button: {button_name}\n"
@@ -574,124 +480,76 @@ def handle_button_press(mac_address: str, button_name: str):
         f"Time: {timestamp}\n\n"
         f"⚠️ Immediate attention required!"
     )
-
+    
+    # Send to alerts channel
     if STATE.channel_id_alerts:
         send_telegram_sync(STATE.channel_id_alerts, alert_message)
-        if STATE.debug:
-            print(f"DEBUG: Telegram alert sent for {button_name} ({mac_address})")
+    else:
+        print("Warning: No alerts channel configured", file=sys.stderr)
 
 
-def start_button_monitoring_polling():
+def packet_handler(packet):
     """
-    Start monitoring Amazon Dash buttons via periodic network polling (arp-scan).
-
-    This function runs a background daemon thread that continuously scans the
-    local network for MAC addresses corresponding to buttons configured in
-    STATE.buttons_config. When a button press is detected, the event is
-    passed to handle_button_press(), which handles debouncing, logging, and
-    sending Telegram alerts.
-
-    Debouncing:
-        - Prevents repeated triggers from the same button within
-          BUTTON_DEBOUNCE_SECONDS (default 5 seconds).
-
-    Threading:
-        - Runs in a daemon thread to allow the main program to exit cleanly.
-        - The thread checks STATE.running as a stop condition.
-
-    Polling:
-        - Scans the network every SCAN_INTERVAL seconds (default 2).
-        - Uses run_arp_scan() to detect devices on the local network.
-
-    Notes:
-        - Ensure STATE.buttons_config is populated with button MAC addresses
-          mapped to human-readable names before calling this function.
-        - The function is safe to call multiple times; each call spawns a
-          separate monitoring thread.
-
-    Returns:
-        threading.Thread: The background thread object monitoring buttons.
+    Process each ARP packet to detect button presses.
+    
+    Parameters
+    ----------
+    packet : scapy.Packet
+        Network packet to analyze.
     """
-    def monitor():
-        print("\n📡 Starting Dash button monitoring (polling)...")
-        print(f"Scanning every {SCAN_INTERVAL} seconds. Press Ctrl+C to stop.\n")
-
-        try:
-            while STATE.running:
-                detected_macs = run_arp_scan()  # scan network for MAC addresses
-
-                for mac, name in STATE.buttons_config.items():
-                    if mac in detected_macs:
-                        # Let handle_button_press() decide if press is debounced
-                        handle_button_press(mac, name)
-
-                time.sleep(SCAN_INTERVAL)
-
-        except KeyboardInterrupt:
-            print("\nButton monitoring interrupted by user")
-            STATE.running = False
-
-        except Exception as e:
-            print(f"\nError in button monitoring: {e}")
-
-    monitor_thread = threading.Thread(target=monitor, daemon=True)
-    monitor_thread.start()
-    return monitor_thread
+    if not STATE.running:
+        return
+    
+    if packet.haslayer(scapy.ARP):
+        mac = packet[scapy.ARP].hwsrc.lower()
+        
+        if mac in STATE.buttons_config:
+            button_name = STATE.buttons_config[mac]
+            handle_button_press(mac, button_name)
 
 
-def discover_dash_buttons_polling(duration: int = 60, scan_interval: int = 2):
+def discover_dash_buttons(duration: int = 60):
     """
-    Discovery mode for Amazon Dash buttons using polling (arp-scan).
-
+    Discovery mode: Monitor network for specified duration to find button MACs.
+    
     Parameters
     ----------
     duration : int
-        Total duration in seconds to monitor for new devices.
-    scan_interval : int
-        Time in seconds between consecutive arp-scan polls.
-
-    Notes
-    -----
-    - Only new MAC addresses not seen before will be reported.
-    - This approach works even on managed networks where passive sniffing fails.
+        Duration in seconds to monitor for button presses.
     """
     print(f"\n{'='*60}")
-    print(f"POLLING DISCOVERY MODE: Monitoring for {duration} seconds...")
+    print(f"DISCOVERY MODE: Monitoring for {duration} seconds...")
     print("Press your Dash buttons now to identify their MAC addresses")
     print(f"{'='*60}\n")
-
-    detected: dict[str, dt_lib.datetime] = {}
-    start_time = time.time()  # Loop control using float seconds
-
+    
+    detected = {}
+    
+    def discover_handler(packet):
+        if packet.haslayer(scapy.ARP):
+            mac = packet[scapy.ARP].hwsrc.lower()
+            if mac not in detected:
+                # Filter for likely Dash button MACs (Amazon OUI prefixes)
+                if mac.startswith(('ac:63:be', '50:f5:da', '74:75:48', 
+                                  '18:74:2e', '00:fc:8b', '68:54:fd',
+                                  'a0:02:dc', '74:c2:46', '84:d6:d0')):
+                    detected[mac] = dt_lib.datetime.now()
+                    print(f"✓ Found potential Dash button: {mac}")
+    
     try:
-        while (time.time() - start_time) < duration:
-            macs = run_arp_scan()  # Uses ARP_SCAN_CMD
-
-            for mac in macs:
-                # Only show new devices
-                if mac not in detected:
-                    # Filter for likely Dash buttons by known Amazon OUIs
-                    if mac.startswith((
-                        "ac:63:be", "50:f5:da", "74:75:48",
-                        "18:74:2e", "00:fc:8b", "68:54:fd",
-                        "a0:02:dc", "74:c2:46", "84:d6:d0"
-                    )):
-                        detected[mac] = dt_lib.datetime.now()  # Store detection timestamp
-                        print(f"✓ Found potential Dash button: {mac}")
-
-            time.sleep(scan_interval)
-
-    except KeyboardInterrupt:
-        print("\nDiscovery interrupted by user")
-
+        scapy.sniff(prn=discover_handler, filter="arp", timeout=duration, store=False)
+    except PermissionError:
+        print("\nERROR: This script requires root privileges")
+        print("Run with: sudo python3 emergency_alert_notificator.py discover")
+        sys.exit(1)
+    
     print(f"\n{'='*60}")
     print("DISCOVERED DEVICES")
     print(f"{'='*60}")
-
+    
     if detected:
         for mac, timestamp in detected.items():
             print(f"MAC: {mac} (detected at {timestamp.strftime('%H:%M:%S')})")
-
+        
         print(f"\n{'='*60}")
         print("Add these to your config/buttons.ini file:")
         print(f"{'='*60}")
@@ -699,9 +557,32 @@ def discover_dash_buttons_polling(duration: int = 60, scan_interval: int = 2):
         for i, mac in enumerate(detected.keys(), 1):
             print(f"{mac} = Button {i}")
     else:
-        print("No Dash buttons detected. Make sure you pressed the buttons during the monitoring period.")
-
+        print("No Dash buttons detected.")
+        print("Make sure you pressed the buttons during the monitoring period.")
+    
     print(f"{'='*60}\n")
+
+
+def start_button_monitoring():
+    """Start monitoring for Dash button presses in a separate thread."""
+    def monitor():
+        print("\n📡 Starting Dash button monitoring...")
+        print("Waiting for button presses... (Ctrl+C to stop)\n")
+        
+        try:
+            scapy.sniff(prn=packet_handler, filter="arp", store=False)
+        except PermissionError:
+            print("\nERROR: This script requires root privileges for button monitoring")
+            print("Run with: sudo python3 emergency_alert_notificator.py")
+            STATE.running = False
+        except Exception as e:
+            if STATE.running:  # Only print if not intentionally stopped
+                print(f"\nButton monitoring error: {e}", file=sys.stderr)
+    
+    # Run scapy in a separate thread to avoid blocking asyncio
+    monitor_thread = threading.Thread(target=monitor, daemon=True)
+    monitor_thread.start()
+    return monitor_thread
 
 
 # ------------------- Main Logic ------------------- #
@@ -763,7 +644,8 @@ async def main(mode: str = "monitor"):
 
     # Discovery mode - no Telegram needed
     if mode == "discover":
-        discover_dash_buttons_polling(SCAN_DURATION, SCAN_INTERVAL)
+        duration = 60
+        discover_dash_buttons(duration)
         return 0
 
     # Validate configuration for monitoring modes
@@ -781,7 +663,7 @@ async def main(mode: str = "monitor"):
 
     # Initialize Telegram bot
     STATE.telegram_bot = tg.Bot(token=telegram_bot_token)
-    STATE.loop = asyncio.get_running_loop()
+    STATE.loop = asyncio.get_event_loop()
 
     # Load button configuration
     try:
@@ -818,7 +700,7 @@ async def main(mode: str = "monitor"):
 
         # Start button monitoring in background thread
         if STATE.buttons_config:
-            monitor_thread = start_button_monitoring_polling()
+            monitor_thread = start_button_monitoring()
             print("✅ System initialized. Monitoring for emergency button presses...\n")
         else:
             print("⚠️  Skipping button monitoring (no buttons configured)")
@@ -841,12 +723,16 @@ async def main(mode: str = "monitor"):
 
 
 if __name__ == "__main__":
-    mode = "monitor"
+    # Parse command line arguments
+    mode = "monitor"  # Default mode
+    
     if len(sys.argv) > 1:
         arg = sys.argv[1].lower()
-        if arg in ("discover", "report-only"):
-            mode = arg
-        elif arg in ("help", "-h", "--help"):
+        if arg == "discover":
+            mode = "discover"
+        elif arg == "report":
+            mode = "report-only"
+        elif arg in ["help", "-h", "--help"]:
             print(f"""
 {APP_NAME}
 
@@ -884,14 +770,25 @@ Configuration:
 Note: System reboots every 7 days, so system reports are sent once per boot cycle.
 """)
             sys.exit(0)
+
     try:
-        exit_code = asyncio.run(main(mode))
-        sys.exit(exit_code)
+        # Check if there's already a running event loop (e.g., in Spyder, Jupyter)
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in an existing event loop, use it directly
+            import nest_asyncio  # Special case for Spyder compatibility
+            nest_asyncio.apply()
+            exit_code = loop.run_until_complete(main(mode))
+            sys.exit(exit_code)
+        except RuntimeError:
+            # No running loop, use asyncio.run() (standard approach)
+            exit_code = asyncio.run(main(mode))
+            sys.exit(exit_code)
     except KeyboardInterrupt:
-        print("Interrupted by user")
+        print("\n\n✓ Interrupted by user")
         sys.exit(130)
     except Exception as e:
-        print(f"Unexpected error: {e}", file=sys.stderr)
+        print(f"\n✗ Unexpected error: {e}", file=sys.stderr)
         import traceback
         traceback.print_exc()
         sys.exit(1)
