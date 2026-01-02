@@ -19,7 +19,7 @@
 set -e  # Exit on error
 
 # ------------------- Configuration ------------------- #
-SERVICE_NAME="emergency_button.service"
+SERVICE_NAME="emergency_button_notificator.service"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SERVICE_FILE="${PROJECT_DIR}/systemd/${SERVICE_NAME}"
@@ -61,12 +61,12 @@ Options:
 
 Installation:
     The service is installed as a system-level service that:
-      - Runs as root (required for packet sniffing with scapy)
+      - Runs as root (required for packet sniffing with arp-scan)
       - Starts automatically at boot
       - Monitors for Dash button presses via ARP packets
       - Sends system health reports and emergency alerts via Telegram
 
-    Note: Root privileges are required because packet sniffing (scapy)
+    Note: Root privileges are required because packet sniffing (arp-scan)
           needs raw network access to detect Dash button ARP packets.
 
 Examples:
@@ -82,7 +82,7 @@ check_prerequisites() {
     
     # Check for sudo/root
     if [[ $EUID -ne 0 ]]; then
-        print_error "This script must be run as root (requires packet sniffing capabilities)."
+        print_error "This script must be run as root (requires packet arp-scanning capabilities)."
         print_info "Please run: sudo $0"
         exit 1
     fi

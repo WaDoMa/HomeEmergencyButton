@@ -685,12 +685,18 @@ sudo crontab -e
 Add the following line:
 ```cron
 # Weekly reboot for filesystem maintenance (Home Emergency Button project)
-0 3 * * 0 /sbin/shutdown -r now
+0 12 * * 5 /usr/bin/touch /forcefsck && /sbin/shutdown -r now
+
 ```
 
-This schedules a reboot every Sunday at 3:00 AM.
+This schedules a reboot every Friday at 12:00 AM after creating a trigger-file  'forcefsck' for forcing fsck to run (trigger-file will be automatically removed by the fsck-run).
 
 ### 7. Install the System Service
+
+For service deamon (role: root) to access the the user directory "/home/<myuser>", the linux rights need to be adjusted.
+```bash
+chmod o+x /home/<myuser>
+```
 
 The project includes an automated installation script. Since button monitoring requires root privileges for packet sniffing, install as a system service:
 
@@ -709,12 +715,12 @@ This automatically:
 
 Check the service status:
 ```bash
-sudo systemctl status emergency_button.service
+sudo systemctl status emergency_button_notificator.service
 ```
 
 View real-time logs:
 ```bash
-sudo journalctl -u emergency_button.service -f
+sudo journalctl -u emergency_button_notificator.service -f
 ```
 
 You should see:
