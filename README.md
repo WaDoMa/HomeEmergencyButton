@@ -542,7 +542,7 @@ pip install -r requirements.txt
 **Required Python packages:**
 - `python-telegram-bot` - Telegram Bot API wrapper
 - `python-dotenv` - Environment variable management
-- `nest-asyncio` - Asyncio compatibility for interactive environments
+
 
 **System dependencies for arp-scan (if not already installed):**
 ```bash
